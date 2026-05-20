@@ -27,12 +27,14 @@ CLOB_BASE  = "https://clob.polymarket.com"
 BTC_KEYWORDS = [
     "bitcoin", "btc", "will btc", "btc up", "btc down",
     "bitcoin up", "bitcoin down", "higher", "lower",
+    "reach", "exceed", "above", "below", "end above", "end below",
+    "close above", "close below", "hit", "touch",
 ]
 
 # Market selection parameters
-MIN_VOLUME         = 1_000.0   # minimum $ volume to consider
-MAX_MARKETS        = 10        # max markets to actively track
-PREFER_EXPIRY_HRS  = (1, 72)   # prefer markets expiring 1–72 hours from now
+MIN_VOLUME         = 500.0     # minimum $ volume to consider
+MAX_MARKETS        = 15        # max markets to actively track
+PREFER_EXPIRY_HRS  = (1, 168)  # prefer markets expiring 1h–7 days from now
 
 
 def _hours_to_expiry(end_date: str) -> Optional[float]:

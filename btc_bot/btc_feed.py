@@ -1,38 +1,37 @@
 """
-Real-time BTC price feed with automatic fallback.
+Real-time BTC price feed.
 
-Priority:
-  1. Kraken WebSocket  (works everywhere, no auth)
-  2. Binance WebSocket (blocked in some regions — HTTP 451)
-  3. CoinGecko REST    (poll every 10s — last resort)
+Sources tried in order:
+  1. CoinGecko REST   — poll every 6s, works everywhere, no auth needed
+  2. Kraken WebSocket — lower latency if REST fails
+  3. Binance REST     — final fallback (public endpoint, no WebSocket)
 """
 from __future__ import annotations
 
 import asyncio
-import json
 from collections import deque
 from typing import Optional
 
 import httpx
-import websockets
 from loguru import logger
 
 
 class BTCFeed:
     """
-    Streams BTC/USD price with automatic source fallback.
+    Polls BTC/USD price with automatic source fallback.
     Provides current price + short-term momentum signal.
     """
 
-    _KRAKEN_URL  = "wss://ws.kraken.com/v2"
-    _BINANCE_URL = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
     _COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
+    _BINANCE_REST  = "https://api.binance.us/api/v3/ticker/price"
+    _KRAKEN_REST   = "https://api.kraken.com/0/public/Ticker"
 
-    def __init__(self, window: int = 60):
+    def __init__(self, window: int = 60, poll_interval: float = 6.0):
         self._price: Optional[float] = None
         self._history: deque[float] = deque(maxlen=window)
         self._callbacks: list = []
         self._source: str = "none"
+        self._poll_interval = poll_interval
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -64,110 +63,88 @@ class BTCFeed:
         for cb in self._callbacks:
             await cb(price)
 
-    # ── Kraken feed ───────────────────────────────────────────────────────────
+    # ── Price fetchers ────────────────────────────────────────────────────────
 
-    async def _run_kraken(self, stop_event: asyncio.Event) -> None:
-        """Kraken v2 WebSocket — global availability, no auth."""
-        subscribe = json.dumps({
-            "method": "subscribe",
-            "params": {"channel": "ticker", "symbol": ["BTC/USD"]},
-        })
-        while not stop_event.is_set():
-            try:
-                async with websockets.connect(self._KRAKEN_URL,
-                                              ping_interval=20) as ws:
-                    await ws.send(subscribe)
-                    self._source = "kraken"
-                    logger.info("BTCFeed: connected to Kraken")
-                    async for raw in ws:
-                        if stop_event.is_set():
-                            break
-                        try:
-                            msg = json.loads(raw)
-                            if msg.get("channel") == "ticker" and msg.get("data"):
-                                price = float(msg["data"][0]["last"])
-                                await self._emit(price)
-                        except (KeyError, ValueError, TypeError):
-                            pass
-            except Exception as exc:
-                if stop_event.is_set():
-                    break
-                logger.warning(f"BTCFeed [Kraken]: {exc} — retrying in 5s")
-                await asyncio.sleep(5)
+    async def _fetch_coingecko(self, http: httpx.AsyncClient) -> Optional[float]:
+        try:
+            r = await http.get(
+                self._COINGECKO_URL,
+                params={"ids": "bitcoin", "vs_currencies": "usd"},
+                timeout=8.0,
+            )
+            r.raise_for_status()
+            return float(r.json()["bitcoin"]["usd"])
+        except Exception as exc:
+            logger.debug(f"BTCFeed [CoinGecko]: {exc}")
+            return None
 
-    # ── Binance feed ──────────────────────────────────────────────────────────
+    async def _fetch_kraken(self, http: httpx.AsyncClient) -> Optional[float]:
+        try:
+            r = await http.get(
+                self._KRAKEN_REST,
+                params={"pair": "XBTUSD"},
+                timeout=8.0,
+            )
+            r.raise_for_status()
+            data = r.json()
+            result = data.get("result", {})
+            pair_data = next(iter(result.values()), {})
+            return float(pair_data["c"][0])  # last trade price
+        except Exception as exc:
+            logger.debug(f"BTCFeed [Kraken REST]: {exc}")
+            return None
 
-    async def _run_binance(self, stop_event: asyncio.Event) -> None:
-        """Binance aggTrade stream — may be blocked in some regions (HTTP 451)."""
-        while not stop_event.is_set():
-            try:
-                async with websockets.connect(self._BINANCE_URL,
-                                              ping_interval=20) as ws:
-                    self._source = "binance"
-                    logger.info("BTCFeed: connected to Binance")
-                    async for raw in ws:
-                        if stop_event.is_set():
-                            break
-                        try:
-                            data  = json.loads(raw)
-                            price = float(data["p"])
-                            await self._emit(price)
-                        except (KeyError, ValueError):
-                            pass
-            except Exception as exc:
-                if stop_event.is_set():
-                    break
-                err = str(exc)
-                if "451" in err:
-                    logger.warning("BTCFeed [Binance]: HTTP 451 — region blocked")
-                    raise  # bubble up so caller can switch source
-                logger.warning(f"BTCFeed [Binance]: {exc} — retrying in 5s")
-                await asyncio.sleep(5)
+    async def _fetch_binance_us(self, http: httpx.AsyncClient) -> Optional[float]:
+        try:
+            r = await http.get(
+                self._BINANCE_REST,
+                params={"symbol": "BTCUSDT"},
+                timeout=8.0,
+            )
+            r.raise_for_status()
+            return float(r.json()["price"])
+        except Exception as exc:
+            logger.debug(f"BTCFeed [Binance.US REST]: {exc}")
+            return None
 
-    # ── CoinGecko REST fallback ───────────────────────────────────────────────
-
-    async def _run_coingecko(self, stop_event: asyncio.Event) -> None:
-        """Poll CoinGecko every 10s — last resort if WebSockets fail."""
-        self._source = "coingecko"
-        logger.info("BTCFeed: falling back to CoinGecko REST polling")
-        async with httpx.AsyncClient(timeout=8.0) as http:
-            while not stop_event.is_set():
-                try:
-                    resp = await http.get(
-                        self._COINGECKO_URL,
-                        params={"ids": "bitcoin", "vs_currencies": "usd"},
-                    )
-                    resp.raise_for_status()
-                    price = float(resp.json()["bitcoin"]["usd"])
-                    await self._emit(price)
-                except Exception as exc:
-                    logger.warning(f"BTCFeed [CoinGecko]: {exc}")
-                await asyncio.sleep(10)
-
-    # ── Main entry point ──────────────────────────────────────────────────────
+    # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        """Try Kraken → Binance → CoinGecko in order."""
-        logger.info("BTCFeed: starting (Kraken → Binance → CoinGecko fallback)")
+        logger.info("BTCFeed: starting REST polling (CoinGecko → Kraken → Binance.US)")
+        async with httpx.AsyncClient() as http:
+            consecutive_failures = 0
+            while not stop_event.is_set():
+                price = await self._fetch_coingecko(http)
+                if price:
+                    if self._source != "coingecko":
+                        logger.info(f"BTCFeed: using CoinGecko — ${price:,.0f}")
+                    self._source = "coingecko"
+                    consecutive_failures = 0
+                    await self._emit(price)
+                else:
+                    price = await self._fetch_kraken(http)
+                    if price:
+                        if self._source != "kraken":
+                            logger.info(f"BTCFeed: using Kraken REST — ${price:,.0f}")
+                        self._source = "kraken"
+                        consecutive_failures = 0
+                        await self._emit(price)
+                    else:
+                        price = await self._fetch_binance_us(http)
+                        if price:
+                            if self._source != "binance.us":
+                                logger.info(f"BTCFeed: using Binance.US — ${price:,.0f}")
+                            self._source = "binance.us"
+                            consecutive_failures = 0
+                            await self._emit(price)
+                        else:
+                            consecutive_failures += 1
+                            self._source = "none"
+                            if consecutive_failures % 5 == 1:
+                                logger.warning(
+                                    f"BTCFeed: all sources failed "
+                                    f"({consecutive_failures} attempts)"
+                                )
 
-        # Try Kraken first
-        try:
-            await self._run_kraken(stop_event)
-            return
-        except Exception as exc:
-            if stop_event.is_set():
-                return
-            logger.warning(f"BTCFeed: Kraken failed ({exc}), trying Binance")
-
-        # Try Binance
-        try:
-            await self._run_binance(stop_event)
-            return
-        except Exception as exc:
-            if stop_event.is_set():
-                return
-            logger.warning(f"BTCFeed: Binance failed ({exc}), falling back to CoinGecko")
-
-        # Last resort: REST polling
-        await self._run_coingecko(stop_event)
+                await asyncio.sleep(self._poll_interval)
         logger.info("BTCFeed: stopped")
