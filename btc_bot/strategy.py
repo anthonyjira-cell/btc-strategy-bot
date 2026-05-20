@@ -26,13 +26,12 @@ from btc_bot import state_store
 # ── Strategy parameters ───────────────────────────────────────────────────────
 
 EDGE_THRESHOLD   = Decimal("0.02")   # enter when price < fair - 2%
-MIN_ARB_SPREAD   = Decimal("0.005")  # pure arb when combined < 0.995 (matches CLOB-verified scanner)
+MIN_ARB_SPREAD   = Decimal("0.03")   # pure arb when combined < 0.97
 MAX_POSITION_SIZE = Decimal("100")   # $ per position (paper)
 FEE_RATE         = Decimal("0.005")  # 0.5% per leg
 MAX_OPEN          = 6                # max concurrent open positions
 HEDGE_TIMEOUT    = 10.0             # seconds to wait for hedge fill
 DIRECTIONAL_STOP = Decimal("0.05")  # close directional if loss > 5%
-ARB_COOLDOWN     = 1800             # seconds before re-entering same arb market (30 min)
 
 
 class BTCStrategy:
@@ -47,8 +46,6 @@ class BTCStrategy:
         self._positions: Dict[str, Position] = {}
         self._btc_price: Optional[float] = None
         self._momentum:  float = 0.0
-        # Cooldown: track last arb entry time per market to avoid rapid re-entry
-        self._arb_last: Dict[str, float] = {}
 
         # Load persisted state
         saved = state_store.load()
@@ -64,17 +61,13 @@ class BTCStrategy:
     async def evaluate_arb_only(self, market: BTCMarket) -> None:
         """
         Pure arb check for non-BTC markets — no directional logic.
-        Only enters if spread >= MIN_ARB_SPREAD and cooldown has elapsed.
+        Only enters if spread >= MIN_ARB_SPREAD.
         """
         mid = market.market_id
         if mid in self._positions:
             await self._check_position(market)
             return
         if len(self._positions) >= MAX_OPEN:
-            return
-        # Cooldown: don't re-enter the same market within ARB_COOLDOWN seconds
-        last = self._arb_last.get(mid, 0)
-        if time.time() - last < ARB_COOLDOWN:
             return
         if market.spread >= MIN_ARB_SPREAD:
             logger.info(
@@ -96,19 +89,12 @@ class BTCStrategy:
             return
 
         # ── Pure arb mode ─────────────────────────────────────────────────────
-        last = self._arb_last.get(mid, 0)
-        if market.spread >= MIN_ARB_SPREAD and time.time() - last >= ARB_COOLDOWN:
+        if market.spread >= MIN_ARB_SPREAD:
             logger.info(
                 f"Strategy: ARB on '{market.label}' | "
                 f"combined={market.combined:.4f} spread={market.spread:.4f}"
             )
             await self._enter_arb(market)
-            return
-
-        # ── Skip near-settled markets (already >90% one way) ─────────────────
-        # Buying the cheap side of a near-settled market and hedging locks in
-        # a loss once fees are applied (combined ~0.998, fees ~1%).
-        if market.yes_ask >= Decimal("0.90") or market.no_ask >= Decimal("0.90"):
             return
 
         # ── Mispricing mode ───────────────────────────────────────────────────
@@ -155,8 +141,6 @@ class BTCStrategy:
         no_fill  = await self._paper.fill(market.market_id, Side.NO,
                                           market.no_ask,  self._size)
         if yes_fill and no_fill:
-            # Record cooldown so we don't re-enter this market for 1 hour
-            self._arb_last[market.market_id] = time.time()
             gross = Decimal("1") - market.yes_ask - market.no_ask
             fees  = (market.yes_ask + market.no_ask) * FEE_RATE * 2
             net   = (gross - fees) * self._size

@@ -35,7 +35,7 @@ logger.add(
 
 MARKET_REFRESH_INTERVAL   = 30    # seconds between BTC market price refreshes
 MARKET_REDISCOVER_INTERVAL = 300  # seconds between full BTC market rediscovery
-ARB_SCAN_INTERVAL          = 60   # seconds between general arb scans
+ARB_SCAN_INTERVAL          = 90   # seconds between general arb scans
 PORT = int(os.environ.get("PORT", 8080))
 
 
@@ -82,16 +82,11 @@ async def main() -> None:
             try:
                 if discover_counter == 0:
                     new = await finder.find_btc_markets(limit=200)
-                    btc_markets.clear()
-                    btc_markets.extend(new)
-                    _rebuild_display()
                     if new:
+                        btc_markets.clear()
+                        btc_markets.extend(new)
+                        _rebuild_display()
                         logger.info(f"Main: {len(btc_markets)} BTC markets loaded")
-                    else:
-                        logger.debug("Main: no BTC markets found this cycle, retrying in 30s")
-                        discover_counter = 0  # retry sooner when nothing found
-                        await asyncio.sleep(MARKET_REFRESH_INTERVAL)
-                        continue
                     discover_counter = MARKET_REDISCOVER_INTERVAL // MARKET_REFRESH_INTERVAL
                 else:
                     for i, m in enumerate(list(btc_markets)):
@@ -106,7 +101,7 @@ async def main() -> None:
     async def arb_scan_loop() -> None:
         while not stop_event.is_set():
             try:
-                candidates = await scanner.find_arb_markets(fetch_limit=2000)
+                candidates = await scanner.find_arb_markets(fetch_limit=500)
                 arb_markets.clear()
                 arb_markets.extend(candidates)
                 _rebuild_display()
