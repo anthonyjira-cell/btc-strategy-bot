@@ -62,7 +62,7 @@ async def main() -> None:
     # ── Choose paper or live trading ──────────────────────────────────────────
     live_mode    = os.environ.get("LIVE_TRADING", "").lower() == "true"
     private_key  = os.environ.get("POLY_PRIVATE_KEY", "")
-    pos_size     = Decimal(os.environ.get("LIVE_POSITION_SIZE", "5"))
+    pos_size     = Decimal(os.environ.get("LIVE_POSITION_SIZE", "100"))
 
     if live_mode and private_key:
         from btc_bot.live_trader import LiveTrader
