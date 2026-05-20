@@ -82,11 +82,16 @@ async def main() -> None:
             try:
                 if discover_counter == 0:
                     new = await finder.find_btc_markets(limit=200)
+                    btc_markets.clear()
+                    btc_markets.extend(new)
+                    _rebuild_display()
                     if new:
-                        btc_markets.clear()
-                        btc_markets.extend(new)
-                        _rebuild_display()
                         logger.info(f"Main: {len(btc_markets)} BTC markets loaded")
+                    else:
+                        logger.debug("Main: no BTC markets found this cycle, retrying in 30s")
+                        discover_counter = 0  # retry sooner when nothing found
+                        await asyncio.sleep(MARKET_REFRESH_INTERVAL)
+                        continue
                     discover_counter = MARKET_REDISCOVER_INTERVAL // MARKET_REFRESH_INTERVAL
                 else:
                     for i, m in enumerate(list(btc_markets)):
