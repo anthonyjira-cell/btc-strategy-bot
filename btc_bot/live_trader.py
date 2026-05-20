@@ -1,10 +1,11 @@
 """
 Live trader: executes real orders on Polymarket CLOB.
 
-Activated when LIVE_TRADING=true env var is set.
-Requires POLY_PRIVATE_KEY env var (your wallet's private key).
-
-Automatically detects neg_risk market type to avoid order_version_mismatch.
+Flow per fill():
+  1. Fetch current CLOB ask for the token
+  2. Skip if ask > limit_price + slippage (won't fill anyway)
+  3. Place a GTC limit order at the CLOB ask price
+  4. Auto-detect neg_risk (try False then True on version_mismatch)
 """
 from __future__ import annotations
 
@@ -12,12 +13,14 @@ import asyncio
 from decimal import Decimal
 from typing import Dict, Optional
 
+import httpx
 from loguru import logger
 
 from btc_bot.models import Side
 
-CLOB_HOST = "https://clob.polymarket.com"
-CHAIN_ID  = 137   # Polygon mainnet
+CLOB_HOST  = "https://clob.polymarket.com"
+CHAIN_ID   = 137        # Polygon mainnet
+SLIPPAGE   = 0.005      # 0.5% — how much above limit we'll still accept
 
 
 class LiveTrader:
@@ -27,16 +30,14 @@ class LiveTrader:
         from py_clob_client.client import ClobClient
         from eth_account import Account
 
-        # Derive wallet address from private key
         wallet_address = Account.from_key(private_key).address
-        logger.info(f"LiveTrader: wallet address {wallet_address}")
+        logger.info(f"LiveTrader: wallet {wallet_address}")
 
-        # Try signature_type=1 (POLY_PROXY) — used by most Polymarket web users
         self._client = ClobClient(
             host=CLOB_HOST,
             chain_id=CHAIN_ID,
             key=private_key,
-            signature_type=1,   # POLY_PROXY (MetaMask / browser wallet)
+            signature_type=1,   # POLY_PROXY — standard for MetaMask/browser wallets
             funder=wallet_address,
         )
 
@@ -45,11 +46,10 @@ class LiveTrader:
             self._client.set_api_creds(creds)
             logger.info("LiveTrader: API credentials ready ✓")
         except Exception as exc:
-            logger.error(f"LiveTrader: credential setup failed: {exc}")
             raise RuntimeError(f"LiveTrader init failed: {exc}") from exc
 
-        # Cache neg_risk per token so we don't retry every time
         self._neg_risk_cache: Dict[str, bool] = {}
+        self._http = httpx.AsyncClient(timeout=5.0)
 
     async def fill(
         self,
@@ -59,71 +59,106 @@ class LiveTrader:
         size: Decimal,
     ) -> Optional[Decimal]:
         """
-        Place a real GTC limit order.
-        Auto-detects neg_risk by trying False then True if version_mismatch.
-        Returns actual fill price on success, None on failure.
+        1. Check current CLOB ask — skip if too far above limit.
+        2. Place GTC order at CLOB ask (ensures immediate fill).
+        3. Auto-detect neg_risk.
+        Returns actual fill price or None.
         """
         from py_clob_client.clob_types import OrderArgs, OrderType
 
         token_id = self._resolve_token(market_id, side)
-        price_f  = float(limit_price)
-        shares   = round(float(size) / price_f, 2)
+        limit_f  = float(limit_price)
 
-        if shares < 1.0:
-            logger.warning(f"LiveTrader: order too small ({shares} shares), skipping")
+        # ── Step 1: fetch current CLOB ask ───────────────────────────────────
+        try:
+            resp = await self._http.get(
+                f"{CLOB_HOST}/price",
+                params={"token_id": token_id, "side": "buy"},
+            )
+            resp.raise_for_status()
+            ask = float(resp.json().get("price", limit_f))
+        except Exception as exc:
+            logger.debug(f"LiveTrader: price fetch error: {exc} — using limit price")
+            ask = limit_f
+
+        # ── Step 2: price check ───────────────────────────────────────────────
+        if ask > limit_f + SLIPPAGE:
+            logger.debug(
+                f"LiveTrader: SKIP {side.value} {token_id[:12]}… "
+                f"ask={ask:.4f} > limit={limit_f:.4f}+slippage"
+            )
             return None
 
-        # Determine which neg_risk values to try
+        # Use actual ask as order price so it fills immediately
+        order_price = ask
+        shares      = round(float(size) / order_price, 2)
+
+        if shares < 1.0:
+            logger.debug(f"LiveTrader: order too small ({shares} shares)")
+            return None
+
+        logger.info(
+            f"LiveTrader: attempting {side.value} {token_id[:12]}… "
+            f"price={order_price:.4f} shares={shares:.2f} (~${float(size):.2f})"
+        )
+
+        # ── Step 3: place order, auto-detect neg_risk ─────────────────────────
+        loop = asyncio.get_running_loop()
+
         if token_id in self._neg_risk_cache:
             neg_risk_values = [self._neg_risk_cache[token_id]]
         else:
-            neg_risk_values = [False, True]  # try both, cache winner
-
-        loop = asyncio.get_event_loop()
+            neg_risk_values = [False, True]
 
         for neg_risk in neg_risk_values:
-            order_args = OrderArgs(
-                token_id=token_id,
-                price=price_f,
-                size=shares,
-                side="BUY",
-                neg_risk=neg_risk,
-            )
             try:
+                # Capture locals explicitly to avoid closure issues in executor
+                _client  = self._client
+                _token   = token_id
+                _price   = order_price
+                _shares  = shares
+                _neg     = neg_risk
+
                 order = await loop.run_in_executor(
-                    None, lambda: self._client.create_order(order_args)
+                    None,
+                    lambda: _client.create_order(OrderArgs(
+                        token_id=_token,
+                        price=_price,
+                        size=_shares,
+                        side="BUY",
+                        neg_risk=_neg,
+                    ))
                 )
                 resp = await loop.run_in_executor(
-                    None, lambda: self._client.post_order(order, OrderType.GTC)
+                    None,
+                    lambda: _client.post_order(order, OrderType.GTC)
                 )
 
                 if resp and resp.get("success"):
                     self._neg_risk_cache[token_id] = neg_risk
                     logger.info(
                         f"LiveTrader: ✅ ORDER PLACED {side.value} "
-                        f"token={token_id[:12]}… "
-                        f"price={price_f:.4f} shares={shares:.2f} "
-                        f"neg_risk={neg_risk} (~${float(size):.2f})"
+                        f"{token_id[:12]}… @ {order_price:.4f} "
+                        f"x{shares:.1f} shares neg_risk={neg_risk}"
                     )
-                    return limit_price
+                    return Decimal(str(order_price))
 
                 err_str = str(resp)
                 if "order_version_mismatch" in err_str:
-                    logger.debug(f"LiveTrader: version mismatch with neg_risk={neg_risk}, trying other value")
-                    continue  # try the other neg_risk value
+                    logger.debug(f"LiveTrader: version mismatch neg_risk={neg_risk}, retrying…")
+                    continue
 
-                logger.warning(f"LiveTrader: order rejected: {resp}")
+                logger.warning(f"LiveTrader: order rejected — {resp}")
                 return None
 
             except Exception as exc:
-                err_str = str(exc)
-                if "order_version_mismatch" in err_str:
-                    logger.debug(f"LiveTrader: version mismatch with neg_risk={neg_risk}, trying other value")
+                if "order_version_mismatch" in str(exc):
+                    logger.debug(f"LiveTrader: version mismatch neg_risk={neg_risk}, retrying…")
                     continue
                 logger.error(f"LiveTrader: order error: {exc}")
                 return None
 
-        logger.warning(f"LiveTrader: order_version_mismatch for both neg_risk values on {token_id[:16]}")
+        logger.warning(f"LiveTrader: version mismatch on both neg_risk values — {token_id[:16]}")
         return None
 
     @staticmethod
@@ -135,4 +170,4 @@ class LiveTrader:
         return market_id
 
     async def close(self) -> None:
-        pass
+        await self._http.aclose()
