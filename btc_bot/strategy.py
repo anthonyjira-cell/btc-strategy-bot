@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from btc_bot.models import BTCMarket, Position, PositionStatus, Side
+from btc_bot import state_store
 
 
 # ── Strategy parameters ───────────────────────────────────────────────────────
@@ -43,10 +44,13 @@ class BTCStrategy:
         self._paper     = paper_trader
         self._size      = position_size
         self._positions: Dict[str, Position] = {}
-        self._cum_pnl   = Decimal("0")
-        self._trades: List[dict] = []
         self._btc_price: Optional[float] = None
         self._momentum:  float = 0.0
+
+        # Load persisted state
+        saved = state_store.load()
+        self._cum_pnl = Decimal(str(saved.get("cum_pnl", 0)))
+        self._trades: List[dict] = saved.get("trades", [])
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -220,6 +224,7 @@ class BTCStrategy:
             "net":        float(net),
             "cum_pnl":    float(self._cum_pnl),
         })
+        state_store.save(self._cum_pnl, self._trades)
 
     # ── State for dashboard ───────────────────────────────────────────────────
 

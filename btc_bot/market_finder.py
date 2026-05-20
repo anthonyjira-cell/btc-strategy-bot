@@ -1,13 +1,19 @@
 """
 Finds active BTC Up/Down binary markets on Polymarket.
 Uses the Gamma API — no auth required.
+
+Scoring logic:
+  - Prefer markets expiring within 4–48 hours (most edge, market makers slow to reprice)
+  - Require minimum volume ($1k) so there's real liquidity
+  - Sort by composite score: nearness-to-expiry * volume
 """
 from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
 
 import httpx
 from loguru import logger
@@ -18,16 +24,66 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE  = "https://clob.polymarket.com"
 
 # Keywords that identify BTC direction markets
-BTC_KEYWORDS = ["bitcoin", "btc", "will btc", "btc up", "btc down",
-                "bitcoin up", "bitcoin down", "higher", "lower"]
+BTC_KEYWORDS = [
+    "bitcoin", "btc", "will btc", "btc up", "btc down",
+    "bitcoin up", "bitcoin down", "higher", "lower",
+]
+
+# Market selection parameters
+MIN_VOLUME         = 1_000.0   # minimum $ volume to consider
+MAX_MARKETS        = 10        # max markets to actively track
+PREFER_EXPIRY_HRS  = (1, 72)   # prefer markets expiring 1–72 hours from now
+
+
+def _hours_to_expiry(end_date: str) -> Optional[float]:
+    """Return hours until market expiry, or None if unparseable."""
+    if not end_date:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(end_date, fmt).replace(tzinfo=timezone.utc)
+            delta = (dt - datetime.now(timezone.utc)).total_seconds() / 3600
+            return max(0.0, delta)
+        except ValueError:
+            continue
+    return None
+
+
+def _score(market: BTCMarket) -> float:
+    """
+    Composite score: higher = better trading opportunity.
+    Near-expiry markets (1–72h) score highest because:
+      - Prices should be near 0 or 1 as resolution approaches
+      - Market makers are slowest to update these
+      - Arb / directional edges are most reliable
+    """
+    hours = _hours_to_expiry(market.end_date)
+    if hours is None:
+        hours = 48.0  # unknown → treat as mid-range
+
+    lo, hi = PREFER_EXPIRY_HRS
+    if hours < lo:
+        # Too close — might already be settling
+        expiry_score = 0.1
+    elif hours <= hi:
+        # Sweet spot — linear peak at lo
+        expiry_score = 1.0 - (hours - lo) / (hi - lo) * 0.7
+    else:
+        # Far out — lower edge
+        expiry_score = 0.3
+
+    # Normalise volume to 0–1 on a log scale (cap at $1M)
+    vol_score = min(1.0, (market.volume / 1_000_000) ** 0.5)
+
+    return expiry_score * 0.7 + vol_score * 0.3
 
 
 class MarketFinder:
     def __init__(self, timeout: float = 10.0):
         self._http = httpx.AsyncClient(timeout=timeout)
 
-    async def find_btc_markets(self, limit: int = 100) -> List[BTCMarket]:
-        """Return active BTC Up/Down markets sorted by volume."""
+    async def find_btc_markets(self, limit: int = 200) -> List[BTCMarket]:
+        """Return top BTC Up/Down markets scored by expiry proximity + volume."""
         try:
             resp = await self._http.get(
                 f"{GAMMA_BASE}/markets",
@@ -39,13 +95,13 @@ class MarketFinder:
                 },
             )
             resp.raise_for_status()
-            markets = resp.json()
+            markets_raw = resp.json()
         except Exception as exc:
             logger.warning(f"MarketFinder: Gamma fetch error: {exc}")
             return []
 
         results: List[BTCMarket] = []
-        for m in markets:
+        for m in markets_raw:
             question = m.get("question", "").lower()
             if not any(kw in question for kw in BTC_KEYWORDS):
                 continue
@@ -55,25 +111,50 @@ class MarketFinder:
             if len(tokens) < 2:
                 continue
 
+            volume = float(m.get("volume") or 0)
+            if volume < MIN_VOLUME:
+                continue
+
             raw_px = m.get("outcomePrices") or ["0.5", "0.5"]
             prices = json.loads(raw_px) if isinstance(raw_px, str) else raw_px
             yes_px = Decimal(str(prices[0])) if prices else Decimal("0.5")
             no_px  = Decimal(str(prices[1])) if len(prices) > 1 else Decimal("0.5")
+
+            end_date = m.get("endDate", "")
+            hours    = _hours_to_expiry(end_date)
+
+            # Skip markets that have already expired
+            if hours is not None and hours <= 0:
+                continue
 
             results.append(BTCMarket(
                 market_id=f"{tokens[0]}:{tokens[1]}",
                 question=m.get("question", ""),
                 yes_ask=yes_px,
                 no_ask=no_px,
-                volume=float(m.get("volume") or 0),
-                end_date=m.get("endDate", ""),
+                volume=volume,
+                end_date=end_date,
             ))
 
-        logger.info(f"MarketFinder: found {len(results)} BTC markets")
-        return results
+        # Sort by composite score, take top N
+        results.sort(key=_score, reverse=True)
+        top = results[:MAX_MARKETS]
+
+        logger.info(
+            f"MarketFinder: {len(results)} BTC markets found → "
+            f"top {len(top)} selected"
+        )
+        for m in top:
+            h = _hours_to_expiry(m.end_date)
+            hrs_str = f"{h:.1f}h" if h is not None else "?"
+            logger.debug(
+                f"  {m.label[:30]:30s} | vol=${m.volume:,.0f} | "
+                f"expiry={hrs_str} | score={_score(m):.2f}"
+            )
+        return top
 
     async def refresh_prices(self, market: BTCMarket) -> BTCMarket:
-        """Fetch live CLOB prices for a single market."""
+        """Fetch live CLOB ask prices for YES and NO tokens."""
         yes_id, no_id = market.market_id.split(":", 1)
         try:
             yes_resp, no_resp = await asyncio.gather(

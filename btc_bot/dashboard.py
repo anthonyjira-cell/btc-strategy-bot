@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from aiohttp import web
@@ -92,11 +93,18 @@ async function refresh(){
     document.getElementById('open').textContent=d.open_positions||0;
 
     document.getElementById('markets').innerHTML=(d.markets||[]).map(m=>`
-      <div class="mkt-card">
+      <div class="mkt-card" title="${m.question}">
         <div class="name">${m.label}</div>
+        <div style="font-size:.75rem;color:#8b949e;margin-bottom:4px">${
+          m.expires_in!=null
+            ? (m.expires_in<2?`<span class="red">⏰ ${m.expires_in}h left</span>`
+              :m.expires_in<24?`<span class="yellow">⏰ ${m.expires_in}h left</span>`
+              :`<span style="color:#8b949e">⏰ ${m.expires_in}h left</span>`)
+            : ''
+        } &nbsp; Vol: $${(m.volume/1000).toFixed(0)}k</div>
         <div>YES <b>${m.yes_ask?.toFixed(3)||'--'}</b> &nbsp; NO <b>${m.no_ask?.toFixed(3)||'--'}</b></div>
         <div>Combined: <b class="${m.spread>0.03?'green':m.spread>0?'yellow':'red'}">${m.combined?.toFixed(4)||'--'}</b>
-          &nbsp; Spread: <b>${m.spread?.toFixed(4)||'--'}</b></div>
+          &nbsp; Spread: <b class="${m.spread>0.03?'green':m.spread>0?'yellow':'red'}">${m.spread?.toFixed(4)||'--'}</b></div>
       </div>`).join('');
 
     document.getElementById('trade-rows').innerHTML=(d.recent_trades||[]).reverse().map(t=>`
@@ -127,6 +135,18 @@ def create_app(strategy: "BTCStrategy", feed: "BTCFeed",
 
     @routes.get("/api/state")
     async def state(req):
+        def hours_to_expiry(end_date: str):
+            if not end_date:
+                return None
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
+                try:
+                    dt = datetime.strptime(end_date, fmt).replace(tzinfo=timezone.utc)
+                    h = (dt - datetime.now(timezone.utc)).total_seconds() / 3600
+                    return round(max(0.0, h), 1)
+                except ValueError:
+                    continue
+            return None
+
         payload = {
             "btc_price":     feed.price,
             "momentum":      feed.momentum,
@@ -135,11 +155,14 @@ def create_app(strategy: "BTCStrategy", feed: "BTCFeed",
             "open_positions":strategy.open_positions,
             "markets": [
                 {
-                    "label":    m.label,
-                    "yes_ask":  float(m.yes_ask),
-                    "no_ask":   float(m.no_ask),
-                    "combined": float(m.combined),
-                    "spread":   float(m.spread),
+                    "label":      m.label,
+                    "question":   m.question,
+                    "yes_ask":    float(m.yes_ask),
+                    "no_ask":     float(m.no_ask),
+                    "combined":   float(m.combined),
+                    "spread":     float(m.spread),
+                    "volume":     m.volume,
+                    "expires_in": hours_to_expiry(m.end_date),
                 }
                 for m in markets_holder
             ],
