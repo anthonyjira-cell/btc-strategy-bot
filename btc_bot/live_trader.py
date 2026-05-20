@@ -40,12 +40,20 @@ class LiveTrader:
         wallet_address = Account.from_key(private_key).address
         logger.info(f"LiveTrader: wallet {wallet_address}")
 
+        # Polymarket deploys a proxy wallet per user; orders must be placed
+        # from that proxy address (not the raw EOA). Set POLY_FUNDER_ADDRESS
+        # to the deposit address shown on polymarket.com → Deposit dialog.
+        import os
+        funder = os.environ.get("POLY_FUNDER_ADDRESS", wallet_address)
+        sig_type = 2 if funder != wallet_address else 0
+        logger.info(f"LiveTrader: funder={funder} sig_type={sig_type}")
+
         self._client = ClobClient(
             host=CLOB_HOST,
             chain_id=CHAIN_ID,
             key=private_key,
-            signature_type=0,   # EOA — correct for MetaMask / direct private key wallets
-            funder=wallet_address,
+            signature_type=sig_type,  # 2 = browser/proxy wallet, 0 = raw EOA
+            funder=funder,
         )
 
         try:
