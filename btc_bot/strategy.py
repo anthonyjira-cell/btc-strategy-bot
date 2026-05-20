@@ -25,13 +25,14 @@ from btc_bot import state_store
 
 # ── Strategy parameters ───────────────────────────────────────────────────────
 
-EDGE_THRESHOLD   = Decimal("0.02")   # enter when price < fair - 2%
-MIN_ARB_SPREAD   = Decimal("0.03")   # pure arb when combined < 0.97
-MAX_POSITION_SIZE = Decimal("100")   # $ per position (paper)
-FEE_RATE         = Decimal("0.005")  # 0.5% per leg
-MAX_OPEN          = 6                # max concurrent open positions
-HEDGE_TIMEOUT    = 10.0             # seconds to wait for hedge fill
-DIRECTIONAL_STOP = Decimal("0.05")  # close directional if loss > 5%
+EDGE_THRESHOLD    = Decimal("0.02")   # enter when price < fair - 2%
+MIN_ARB_SPREAD    = Decimal("0.03")   # pure arb when combined < 0.97
+MAX_POSITION_SIZE = Decimal("100")    # $ per position (paper)
+FEE_RATE          = Decimal("0.005")  # 0.5% per leg
+MAX_OPEN          = 6                 # max concurrent open positions
+HEDGE_TIMEOUT     = 10.0             # seconds to wait for hedge fill
+DIRECTIONAL_STOP  = Decimal("0.05")  # close directional if loss > 5%
+ARB_COOLDOWN      = 3600             # seconds before re-entering same market (1 hour)
 
 
 class BTCStrategy:
@@ -46,6 +47,7 @@ class BTCStrategy:
         self._positions: Dict[str, Position] = {}
         self._btc_price: Optional[float] = None
         self._momentum:  float = 0.0
+        self._last_entry: Dict[str, float] = {}  # cooldown tracker per market
 
         # Load persisted state
         saved = state_store.load()
@@ -58,16 +60,25 @@ class BTCStrategy:
         self._btc_price = price
         self._momentum  = momentum
 
+    def _on_cooldown(self, market_id: str) -> bool:
+        """Returns True if this market was entered recently (within ARB_COOLDOWN)."""
+        return time.time() - self._last_entry.get(market_id, 0) < ARB_COOLDOWN
+
+    def _record_entry(self, market_id: str) -> None:
+        self._last_entry[market_id] = time.time()
+
     async def evaluate_arb_only(self, market: BTCMarket) -> None:
         """
         Pure arb check for non-BTC markets — no directional logic.
-        Only enters if spread >= MIN_ARB_SPREAD.
+        Only enters if spread >= MIN_ARB_SPREAD and not on cooldown.
         """
         mid = market.market_id
         if mid in self._positions:
             await self._check_position(market)
             return
         if len(self._positions) >= MAX_OPEN:
+            return
+        if self._on_cooldown(mid):
             return
         if market.spread >= MIN_ARB_SPREAD:
             logger.info(
@@ -89,7 +100,7 @@ class BTCStrategy:
             return
 
         # ── Pure arb mode ─────────────────────────────────────────────────────
-        if market.spread >= MIN_ARB_SPREAD:
+        if market.spread >= MIN_ARB_SPREAD and not self._on_cooldown(mid):
             logger.info(
                 f"Strategy: ARB on '{market.label}' | "
                 f"combined={market.combined:.4f} spread={market.spread:.4f}"
@@ -98,6 +109,9 @@ class BTCStrategy:
             return
 
         # ── Mispricing mode ───────────────────────────────────────────────────
+        if self._on_cooldown(mid):
+            return
+
         fair_yes = self._fair_yes(market)
         fair_no  = Decimal("1") - fair_yes
 
@@ -136,32 +150,36 @@ class BTCStrategy:
     # ── Trade execution (paper) ───────────────────────────────────────────────
 
     async def _enter_arb(self, market: BTCMarket) -> None:
-        yes_fill = await self._paper.fill(market.market_id, Side.YES,
-                                          market.yes_ask, self._size)
-        no_fill  = await self._paper.fill(market.market_id, Side.NO,
-                                          market.no_ask,  self._size)
-        if yes_fill and no_fill:
-            gross = Decimal("1") - market.yes_ask - market.no_ask
-            fees  = (market.yes_ask + market.no_ask) * FEE_RATE * 2
+        yes_price = await self._paper.fill(market.market_id, Side.YES,
+                                           market.yes_ask, self._size)
+        no_price  = await self._paper.fill(market.market_id, Side.NO,
+                                           market.no_ask,  self._size)
+        if yes_price is not None and no_price is not None:
+            self._record_entry(market.market_id)
+            # P&L uses actual fill prices, not Gamma midpoints
+            gross = Decimal("1") - yes_price - no_price
+            fees  = (yes_price + no_price) * FEE_RATE * 2
             net   = (gross - fees) * self._size
             self._cum_pnl += net
             self._record_trade(market, "arb", net)
             logger.info(
                 f"Strategy: ARB FILLED '{market.label}' "
-                f"net=+${net:.2f} | cum=${self._cum_pnl:.2f}"
+                f"yes={yes_price:.3f} no={no_price:.3f} "
+                f"net=${net:.2f} | cum=${self._cum_pnl:.2f}"
             )
 
     async def _enter_directional(self, market: BTCMarket,
                                   side: Side, price: Decimal) -> None:
-        fill = await self._paper.fill(market.market_id, side, price, self._size)
-        if not fill:
+        fill_price = await self._paper.fill(market.market_id, side, price, self._size)
+        if fill_price is None:
             return
 
+        self._record_entry(market.market_id)
         pos = Position(
             market_id=market.market_id,
             question=market.question,
             entry_side=side,
-            entry_price=price,
+            entry_price=fill_price,   # use actual fill price
             size=self._size,
         )
         self._positions[market.market_id] = pos
@@ -171,9 +189,9 @@ class BTCStrategy:
         hedge_price = market.no_ask if hedge_side == Side.NO else market.yes_ask
         hedge_fill  = await self._paper.fill(market.market_id, hedge_side,
                                              hedge_price, self._size)
-        if hedge_fill:
+        if hedge_fill is not None:
             pos.hedge_side  = hedge_side
-            pos.hedge_price = hedge_price
+            pos.hedge_price = hedge_fill   # use actual hedge fill price
             pos.hedge_at    = time.time()
             net = pos.close_arb()
             self._cum_pnl += net
@@ -181,13 +199,13 @@ class BTCStrategy:
             self._record_trade(market, "directional+hedge", net)
             logger.info(
                 f"Strategy: HEDGED '{market.label}' "
-                f"entry={price:.3f} hedge={hedge_price:.3f} "
-                f"net=+${net:.2f} | cum=${self._cum_pnl:.2f}"
+                f"entry={fill_price:.3f} hedge={hedge_fill:.3f} "
+                f"net=${net:.2f} | cum=${self._cum_pnl:.2f}"
             )
         else:
             logger.info(
                 f"Strategy: DIRECTIONAL open '{market.label}' "
-                f"{side} @ {price:.3f} (hedge pending)"
+                f"{side} @ {fill_price:.3f} (hedge pending)"
             )
 
     async def _check_position(self, market: BTCMarket) -> None:
@@ -202,11 +220,11 @@ class BTCStrategy:
         # Try to lock in arb if combined is still favourable
         combined = pos.entry_price + hedge_price
         if combined < (Decimal("1") - FEE_RATE * 2):
-            fill = await self._paper.fill(market.market_id, hedge_side,
-                                          hedge_price, pos.size)
-            if fill:
+            fill_price = await self._paper.fill(market.market_id, hedge_side,
+                                                hedge_price, pos.size)
+            if fill_price is not None:
                 pos.hedge_side  = hedge_side
-                pos.hedge_price = hedge_price
+                pos.hedge_price = fill_price
                 net = pos.close_arb()
                 self._cum_pnl += net
                 del self._positions[market.market_id]
@@ -236,11 +254,11 @@ class BTCStrategy:
     def _record_trade(self, market: BTCMarket, trade_type: str,
                       net: Decimal) -> None:
         self._trades.append({
-            "time":       time.time(),
-            "market":     market.label,
-            "type":       trade_type,
-            "net":        float(net),
-            "cum_pnl":    float(self._cum_pnl),
+            "time":    time.time(),
+            "market":  market.label,
+            "type":    trade_type,
+            "net":     float(net),
+            "cum_pnl": float(self._cum_pnl),
         })
         state_store.save(self._cum_pnl, self._trades)
 

@@ -1,6 +1,8 @@
 """
 Paper trader: simulates fills using real Polymarket CLOB prices.
-A buy order fills if the current ask price <= our limit price.
+A buy order fills if the current ask price <= our limit price + slippage.
+Returns the actual CLOB ask price on fill (not the limit price) so that
+P&L calculations reflect what you'd really pay.
 """
 from __future__ import annotations
 
@@ -26,10 +28,12 @@ class PaperTrader:
         side: Side,
         limit_price: Decimal,
         size: Decimal,
-    ) -> bool:
+    ) -> Optional[Decimal]:
         """
-        Returns True if the order would fill at current market prices.
+        Returns the actual fill price (CLOB ask) if the order would fill,
+        or None if it wouldn't.
         We fetch the live ask from CLOB and fill if ask <= limit_price + slippage.
+        Using the real ask price means P&L reflects actual execution cost.
         """
         token_id = self._resolve_token(market_id, side)
         try:
@@ -41,16 +45,16 @@ class PaperTrader:
             ask = Decimal(str(resp.json().get("price", "0.5")))
         except Exception as exc:
             logger.debug(f"PaperTrader: price fetch error: {exc}")
-            # Assume fill on API error (conservative)
-            return True
+            # On API error, assume fill at limit price (conservative fallback)
+            return limit_price
 
-        fills = ask <= limit_price + self._slippage
-        if fills:
+        if ask <= limit_price + self._slippage:
             logger.debug(
                 f"PaperTrader: FILL {side} {market_id[:16]} "
                 f"@ ask={ask:.4f} limit={limit_price:.4f}"
             )
-        return fills
+            return ask  # return real price paid
+        return None  # didn't fill
 
     @staticmethod
     def _resolve_token(market_id: str, side: Side) -> str:
