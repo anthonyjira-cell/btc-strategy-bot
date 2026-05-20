@@ -110,7 +110,6 @@ class LiveTrader:
                 _token   = token_id
                 _price   = order_price
                 _shares  = shares
-                _neg     = neg_risk
 
                 order = await loop.run_in_executor(
                     None,
