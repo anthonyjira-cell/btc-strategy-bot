@@ -32,12 +32,13 @@ BTC_KEYWORDS = [
 BTC_DIRECTION_WORDS = [
     "price", "above", "below", "higher", "lower", "hit", "reach",
     "exceed", "end", "close", "up", "down", "worth", "over", "under",
+    "between", "stay", "remain", "cross", "break", "surpass",
 ]
 
 # Market selection parameters
-MIN_VOLUME         = 500.0     # minimum $ volume to consider
-MAX_MARKETS        = 15        # max markets to actively track
-PREFER_EXPIRY_HRS  = (1, 168)  # prefer markets expiring 1h–7 days from now
+MIN_VOLUME         = 50.0      # very low floor — catch thin BTC markets too
+MAX_MARKETS        = 25        # track more markets for more trading opportunities
+PREFER_EXPIRY_HRS  = (1, 720)  # wider window: 1h–30 days (catch monthly markets)
 
 
 def _hours_to_expiry(end_date: str) -> Optional[float]:
@@ -87,7 +88,7 @@ class MarketFinder:
     def __init__(self, timeout: float = 10.0):
         self._http = httpx.AsyncClient(timeout=timeout)
 
-    async def find_btc_markets(self, limit: int = 200) -> List[BTCMarket]:
+    async def find_btc_markets(self, limit: int = 500) -> List[BTCMarket]:
         """Return top BTC Up/Down markets scored by expiry proximity + volume."""
         try:
             resp = await self._http.get(

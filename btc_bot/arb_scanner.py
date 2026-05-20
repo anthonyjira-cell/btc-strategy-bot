@@ -27,16 +27,16 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE  = "https://clob.polymarket.com"
 
 # Stage-1 Gamma pre-filter — only CLOB-verify markets whose midpoints already
-# suggest slack.  Set generously (0.995) so we don't miss edge cases where
-# mid < ask but combined mids still close to 1.
-PRE_FILTER_COMBINED = Decimal("0.995")
+# suggest slack.  Set at 1.0 so ALL non-near-settled markets are checked;
+# real arb can exist even when midpoints sum to 1.0 (stale/thin order books).
+PRE_FILTER_COMBINED = Decimal("1.0")   # pass everything — filter by CLOB in stage 2
 
 # Stage-2 threshold — actual CLOB ask prices must beat this to be tradeable
-MIN_ARB_SPREAD  = Decimal("0.01")   # 1%+ net after fees
-MIN_VOLUME      = 100.0             # very low floor — thin markets can arb too
-MAX_CLOB_CHECKS = 150               # max concurrent CLOB verifications
+MIN_ARB_SPREAD  = Decimal("0.005")  # 0.5%+ spread in CLOB asks
+MIN_VOLUME      = 50.0              # very low floor — thin markets arb more often
+MAX_CLOB_CHECKS = 200               # check more markets per cycle
 MAX_CANDIDATES  = 50                # final result cap
-CLOB_CONCURRENCY = 15              # simultaneous CLOB request pairs
+CLOB_CONCURRENCY = 20              # simultaneous CLOB request pairs
 
 
 class ArbScanner:
@@ -84,7 +84,12 @@ class ArbScanner:
             yes_px = Decimal(str(prices[0])) if prices else Decimal("0.5")
             no_px  = Decimal(str(prices[1])) if len(prices) > 1 else Decimal("0.5")
 
-            # Stage-1 pre-filter: midpoints must leave some room
+            # Stage-1 pre-filter: skip near-settled markets (one side already >97%)
+            # These have no real arb headroom regardless of CLOB prices.
+            if yes_px >= Decimal("0.97") or no_px >= Decimal("0.97"):
+                continue
+            # Also skip perfectly efficient markets (combined exactly 1.0 to 4dp)
+            # — only bother checking markets with any Gamma slack
             combined = yes_px + no_px
             if combined >= PRE_FILTER_COMBINED:
                 continue
