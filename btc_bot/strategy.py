@@ -58,6 +58,24 @@ class BTCStrategy:
         self._btc_price = price
         self._momentum  = momentum
 
+    async def evaluate_arb_only(self, market: BTCMarket) -> None:
+        """
+        Pure arb check for non-BTC markets — no directional logic.
+        Only enters if spread >= MIN_ARB_SPREAD.
+        """
+        mid = market.market_id
+        if mid in self._positions:
+            await self._check_position(market)
+            return
+        if len(self._positions) >= MAX_OPEN:
+            return
+        if market.spread >= MIN_ARB_SPREAD:
+            logger.info(
+                f"Strategy: ARB (general) '{market.label}' | "
+                f"combined={float(market.combined):.4f} spread={float(market.spread):.4f}"
+            )
+            await self._enter_arb(market)
+
     async def evaluate_market(self, market: BTCMarket) -> None:
         """Called every poll cycle with fresh market prices."""
         mid = market.market_id
