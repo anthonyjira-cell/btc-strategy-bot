@@ -26,13 +26,13 @@ from btc_bot import state_store
 # ── Strategy parameters ───────────────────────────────────────────────────────
 
 EDGE_THRESHOLD   = Decimal("0.02")   # enter when price < fair - 2%
-MIN_ARB_SPREAD   = Decimal("0.02")   # pure arb when combined < 0.98 (net ~1% after fees)
+MIN_ARB_SPREAD   = Decimal("0.015")  # pure arb when combined < 0.985 (~0.5% net after fees)
 MAX_POSITION_SIZE = Decimal("100")   # $ per position (paper)
 FEE_RATE         = Decimal("0.005")  # 0.5% per leg
 MAX_OPEN          = 6                # max concurrent open positions
 HEDGE_TIMEOUT    = 10.0             # seconds to wait for hedge fill
 DIRECTIONAL_STOP = Decimal("0.05")  # close directional if loss > 5%
-ARB_COOLDOWN     = 3600             # seconds before re-entering same arb market (1h)
+ARB_COOLDOWN     = 1800             # seconds before re-entering same arb market (30 min)
 
 
 class BTCStrategy:

@@ -21,9 +21,9 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE  = "https://clob.polymarket.com"
 
 # Arb thresholds
-MIN_ARB_SPREAD  = Decimal("0.02")   # need 2%+ spread (fees ~1%, want 1%+ profit)
-MIN_VOLUME      = 2_000.0           # $2k minimum volume — some liquidity required
-MAX_CANDIDATES  = 20                # how many to return per scan
+MIN_ARB_SPREAD  = Decimal("0.015")  # 1.5%+ spread → ~0.5% net after fees
+MIN_VOLUME      = 200.0             # lower volume floor to catch more markets
+MAX_CANDIDATES  = 50                # return top 50 arb opportunities per scan
 
 
 class ArbScanner:

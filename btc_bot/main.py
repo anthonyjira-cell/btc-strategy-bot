@@ -35,7 +35,7 @@ logger.add(
 
 MARKET_REFRESH_INTERVAL   = 30    # seconds between BTC market price refreshes
 MARKET_REDISCOVER_INTERVAL = 300  # seconds between full BTC market rediscovery
-ARB_SCAN_INTERVAL          = 90   # seconds between general arb scans
+ARB_SCAN_INTERVAL          = 60   # seconds between general arb scans
 PORT = int(os.environ.get("PORT", 8080))
 
 
@@ -106,7 +106,7 @@ async def main() -> None:
     async def arb_scan_loop() -> None:
         while not stop_event.is_set():
             try:
-                candidates = await scanner.find_arb_markets(fetch_limit=1000)
+                candidates = await scanner.find_arb_markets(fetch_limit=2000)
                 arb_markets.clear()
                 arb_markets.extend(candidates)
                 _rebuild_display()
