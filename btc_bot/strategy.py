@@ -97,6 +97,12 @@ class BTCStrategy:
             await self._enter_arb(market)
             return
 
+        # ── Skip near-settled markets (already >90% one way) ─────────────────
+        # Buying the cheap side of a near-settled market and hedging locks in
+        # a loss once fees are applied (combined ~0.998, fees ~1%).
+        if market.yes_ask >= Decimal("0.90") or market.no_ask >= Decimal("0.90"):
+            return
+
         # ── Mispricing mode ───────────────────────────────────────────────────
         fair_yes = self._fair_yes(market)
         fair_no  = Decimal("1") - fair_yes

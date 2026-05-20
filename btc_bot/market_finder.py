@@ -25,10 +25,13 @@ CLOB_BASE  = "https://clob.polymarket.com"
 
 # Keywords that identify BTC direction markets
 BTC_KEYWORDS = [
-    "bitcoin", "btc", "will btc", "btc up", "btc down",
-    "bitcoin up", "bitcoin down", "higher", "lower",
-    "reach", "exceed", "above", "below", "end above", "end below",
-    "close above", "close below", "hit", "touch",
+    "bitcoin", "btc",
+]
+
+# Require at least one of these alongside a BTC keyword
+BTC_DIRECTION_WORDS = [
+    "price", "above", "below", "higher", "lower", "hit", "reach",
+    "exceed", "end", "close", "up", "down", "worth", "over", "under",
 ]
 
 # Market selection parameters
@@ -105,7 +108,10 @@ class MarketFinder:
         results: List[BTCMarket] = []
         for m in markets_raw:
             question = m.get("question", "").lower()
-            if not any(kw in question for kw in BTC_KEYWORDS):
+            # Must mention bitcoin/btc AND a direction/price word
+            has_btc = any(kw in question for kw in BTC_KEYWORDS)
+            has_dir = any(w in question for w in BTC_DIRECTION_WORDS)
+            if not (has_btc and has_dir):
                 continue
 
             raw_tok = m.get("clobTokenIds") or []
