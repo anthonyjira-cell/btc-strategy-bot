@@ -1,0 +1,12 @@
+# Only track source files
+*
+!btc_bot/
+!btc_bot/*.py
+!requirements.txt
+!Procfile
+!runtime.txt
+!.gitignore
+__pycache__/
+*.pyc
+*.pyo
+.env
