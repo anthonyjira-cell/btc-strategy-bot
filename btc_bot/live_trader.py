@@ -45,7 +45,10 @@ class LiveTrader:
         # to the deposit address shown on polymarket.com → Deposit dialog.
         import os
         funder = os.environ.get("POLY_FUNDER_ADDRESS", wallet_address)
-        sig_type = 2 if funder != wallet_address else 0
+        # sig_type=1 = POLY_PROXY: EOA private key signs on behalf of
+        # the Polymarket proxy/deposit wallet. This is the correct mode
+        # for Rabby/MetaMask wallets that went through Polymarket's UI.
+        sig_type = 1 if funder != wallet_address else 0
         logger.info(f"LiveTrader: funder={funder} sig_type={sig_type}")
 
         self._client = ClobClient(
