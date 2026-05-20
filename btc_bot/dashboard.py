@@ -50,7 +50,7 @@ _HTML = """<!DOCTYPE html>
 <div class="sub">Hybrid arb / market-making / hedging on Polymarket BTC markets</div>
 
 <div class="stats">
-  <div>BTC Price: <span id="btc">—</span></div>
+  <div>BTC Price: <span id="btc">—</span> <span id="src" style="font-size:.7rem;color:#8b949e"></span></div>
   <div>Momentum: <span id="mom">—</span></div>
   <div>Cum PnL: <span id="pnl">—</span></div>
   <div>Trades: <span id="trades">—</span></div>
@@ -86,6 +86,7 @@ async function refresh(){
   try{
     const d=await fetch('/api/state').then(r=>r.json());
     document.getElementById('btc').textContent=d.btc_price?'$'+d.btc_price.toLocaleString():'—';
+    document.getElementById('src').textContent=d.btc_source?`via ${d.btc_source}`:'';
     document.getElementById('mom').innerHTML=momLabel(d.momentum||0);
     const p=d.cum_pnl||0;
     document.getElementById('pnl').innerHTML=`<span class="${cls(p)}">${fmt(p,2)}</span>`;
@@ -149,6 +150,7 @@ def create_app(strategy: "BTCStrategy", feed: "BTCFeed",
 
         payload = {
             "btc_price":     feed.price,
+            "btc_source":    feed.source,
             "momentum":      feed.momentum,
             "cum_pnl":       float(strategy.cumulative_pnl),
             "trade_count":   strategy.trade_count,
