@@ -7,6 +7,11 @@ Runs:
   - ArbScanner     — scans ALL Polymarket markets for pure arb every 90s
   - BTCStrategy    — evaluates markets: BTC momentum + pure arb
   - Web dashboard  — aiohttp on $PORT (default 8080)
+
+Live trading mode (set in Railway environment variables):
+  LIVE_TRADING=true          — enable real order execution
+  POLY_PRIVATE_KEY=0x...     — your Polymarket wallet private key
+  LIVE_POSITION_SIZE=5       — dollars per trade (default $5, max suggested $10)
 """
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ import asyncio
 import os
 import signal
 import sys
+from decimal import Decimal
 
 from loguru import logger
 
@@ -49,11 +55,31 @@ async def main() -> None:
         except NotImplementedError:
             pass
 
-    feed     = BTCFeed()
-    finder   = MarketFinder()
-    scanner  = ArbScanner()
-    trader   = PaperTrader()
-    strategy = BTCStrategy(trader)
+    feed    = BTCFeed()
+    finder  = MarketFinder()
+    scanner = ArbScanner()
+
+    # ── Choose paper or live trading ──────────────────────────────────────────
+    live_mode    = os.environ.get("LIVE_TRADING", "").lower() == "true"
+    private_key  = os.environ.get("POLY_PRIVATE_KEY", "")
+    pos_size     = Decimal(os.environ.get("LIVE_POSITION_SIZE", "5"))
+
+    if live_mode and private_key:
+        from btc_bot.live_trader import LiveTrader
+        trader = LiveTrader(private_key)
+        logger.warning(
+            f"⚠️  LIVE TRADING ENABLED — ${pos_size} per trade — REAL MONEY"
+        )
+    else:
+        trader = PaperTrader()
+        if live_mode and not private_key:
+            logger.warning(
+                "LIVE_TRADING=true but POLY_PRIVATE_KEY not set — using paper mode"
+            )
+        else:
+            logger.info("Main: paper trading mode")
+
+    strategy = BTCStrategy(trader, position_size=pos_size)
 
     btc_markets:  list = []  # BTC-specific markets
     arb_markets:  list = []  # general arb candidates
