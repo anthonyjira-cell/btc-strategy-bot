@@ -32,6 +32,7 @@ FEE_RATE         = Decimal("0.005")  # 0.5% per leg
 MAX_OPEN          = 6                # max concurrent open positions
 HEDGE_TIMEOUT    = 10.0             # seconds to wait for hedge fill
 DIRECTIONAL_STOP = Decimal("0.05")  # close directional if loss > 5%
+ARB_COOLDOWN     = 3600             # seconds before re-entering same arb market (1h)
 
 
 class BTCStrategy:
@@ -46,6 +47,8 @@ class BTCStrategy:
         self._positions: Dict[str, Position] = {}
         self._btc_price: Optional[float] = None
         self._momentum:  float = 0.0
+        # Cooldown: track last arb entry time per market to avoid rapid re-entry
+        self._arb_last: Dict[str, float] = {}
 
         # Load persisted state
         saved = state_store.load()
@@ -61,13 +64,17 @@ class BTCStrategy:
     async def evaluate_arb_only(self, market: BTCMarket) -> None:
         """
         Pure arb check for non-BTC markets — no directional logic.
-        Only enters if spread >= MIN_ARB_SPREAD.
+        Only enters if spread >= MIN_ARB_SPREAD and cooldown has elapsed.
         """
         mid = market.market_id
         if mid in self._positions:
             await self._check_position(market)
             return
         if len(self._positions) >= MAX_OPEN:
+            return
+        # Cooldown: don't re-enter the same market within ARB_COOLDOWN seconds
+        last = self._arb_last.get(mid, 0)
+        if time.time() - last < ARB_COOLDOWN:
             return
         if market.spread >= MIN_ARB_SPREAD:
             logger.info(
@@ -89,7 +96,8 @@ class BTCStrategy:
             return
 
         # ── Pure arb mode ─────────────────────────────────────────────────────
-        if market.spread >= MIN_ARB_SPREAD:
+        last = self._arb_last.get(mid, 0)
+        if market.spread >= MIN_ARB_SPREAD and time.time() - last >= ARB_COOLDOWN:
             logger.info(
                 f"Strategy: ARB on '{market.label}' | "
                 f"combined={market.combined:.4f} spread={market.spread:.4f}"
@@ -147,6 +155,8 @@ class BTCStrategy:
         no_fill  = await self._paper.fill(market.market_id, Side.NO,
                                           market.no_ask,  self._size)
         if yes_fill and no_fill:
+            # Record cooldown so we don't re-enter this market for 1 hour
+            self._arb_last[market.market_id] = time.time()
             gross = Decimal("1") - market.yes_ask - market.no_ask
             fees  = (market.yes_ask + market.no_ask) * FEE_RATE * 2
             net   = (gross - fees) * self._size
