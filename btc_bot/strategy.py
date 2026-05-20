@@ -26,7 +26,7 @@ from btc_bot import state_store
 # ── Strategy parameters ───────────────────────────────────────────────────────
 
 EDGE_THRESHOLD   = Decimal("0.02")   # enter when price < fair - 2%
-MIN_ARB_SPREAD   = Decimal("0.03")   # pure arb when combined < 0.97
+MIN_ARB_SPREAD   = Decimal("0.02")   # pure arb when combined < 0.98 (net ~1% after fees)
 MAX_POSITION_SIZE = Decimal("100")   # $ per position (paper)
 FEE_RATE         = Decimal("0.005")  # 0.5% per leg
 MAX_OPEN          = 6                # max concurrent open positions

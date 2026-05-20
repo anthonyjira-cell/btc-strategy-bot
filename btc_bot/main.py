@@ -101,7 +101,7 @@ async def main() -> None:
     async def arb_scan_loop() -> None:
         while not stop_event.is_set():
             try:
-                candidates = await scanner.find_arb_markets(fetch_limit=500)
+                candidates = await scanner.find_arb_markets(fetch_limit=1000)
                 arb_markets.clear()
                 arb_markets.extend(candidates)
                 _rebuild_display()
