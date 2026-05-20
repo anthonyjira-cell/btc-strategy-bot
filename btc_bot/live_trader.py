@@ -5,7 +5,8 @@ Flow per fill():
   1. Fetch current CLOB ask for the token
   2. Skip if ask > limit_price + slippage (won't fill anyway)
   3. Place a GTC limit order at the CLOB ask price
-  4. Auto-detect neg_risk (try False then True on version_mismatch)
+  4. Try neg_risk=True first (all current Polymarket markets use the NegRisk
+     exchange). If order_version_mismatch, retry with neg_risk=False.
 """
 from __future__ import annotations
 
@@ -60,10 +61,10 @@ class LiveTrader:
         """
         1. Check current CLOB ask — skip if too far above limit.
         2. Place GTC order at CLOB ask (ensures immediate fill).
-        3. Auto-detect neg_risk.
+        3. Try neg_risk=True first, fall back to False on version_mismatch.
         Returns actual fill price or None.
         """
-        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
 
         token_id = self._resolve_token(market_id, side)
         limit_f  = float(limit_price)
@@ -101,24 +102,28 @@ class LiveTrader:
             f"price={order_price:.4f} shares={shares:.2f} (~${float(size):.2f})"
         )
 
-        # ── Step 3: place order, auto-detect neg_risk ─────────────────────────
+        # ── Step 3: place order — try neg_risk=True, fall back to False ───────
         loop = asyncio.get_running_loop()
 
-        try:
-                # Capture locals explicitly to avoid closure issues in executor
-                _client  = self._client
-                _token   = token_id
-                _price   = order_price
-                _shares  = shares
+        _client = self._client
+        _token  = token_id
+        _price  = order_price
+        _shares = shares
 
+        for neg_risk in (True, False):
+            try:
+                _neg = neg_risk
                 order = await loop.run_in_executor(
                     None,
-                    lambda: _client.create_order(OrderArgs(
-                        token_id=_token,
-                        price=_price,
-                        size=_shares,
-                        side="BUY",
-                    ))
+                    lambda: _client.create_order(
+                        OrderArgs(
+                            token_id=_token,
+                            price=_price,
+                            size=_shares,
+                            side="BUY",
+                        ),
+                        PartialCreateOrderOptions(neg_risk=_neg),
+                    )
                 )
                 resp = await loop.run_in_executor(
                     None,
@@ -128,16 +133,34 @@ class LiveTrader:
                 if resp and resp.get("success"):
                     logger.info(
                         f"LiveTrader: ✅ ORDER PLACED {side.value} "
-                        f"{token_id[:12]}… @ {order_price:.4f} x{shares:.1f} shares"
+                        f"{token_id[:12]}… @ {order_price:.4f} x{shares:.1f} shares "
+                        f"(neg_risk={neg_risk})"
                     )
                     return Decimal(str(order_price))
+
+                # Check if it's specifically a version mismatch → retry with other flag
+                err = str(resp) if resp else ""
+                if "order_version_mismatch" in err:
+                    logger.debug(
+                        f"LiveTrader: version mismatch with neg_risk={neg_risk}, retrying…"
+                    )
+                    continue
 
                 logger.warning(f"LiveTrader: order rejected — {resp}")
                 return None
 
-        except Exception as exc:
-            logger.error(f"LiveTrader: order error: {exc}")
-            return None
+            except Exception as exc:
+                err = str(exc)
+                if "order_version_mismatch" in err:
+                    logger.debug(
+                        f"LiveTrader: version mismatch with neg_risk={neg_risk}, retrying…"
+                    )
+                    continue
+                logger.error(f"LiveTrader: order error: {exc}")
+                return None
+
+        logger.warning(f"LiveTrader: order failed on both neg_risk values — skipping")
+        return None
 
     @staticmethod
     def _resolve_token(market_id: str, side: Side) -> str:
