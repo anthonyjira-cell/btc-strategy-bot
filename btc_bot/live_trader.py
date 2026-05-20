@@ -1,12 +1,18 @@
 """
-Live trader: executes real orders on Polymarket CLOB.
+Live trader: executes real orders on Polymarket CLOB using py-clob-client-v2.
 
 Flow per fill():
   1. Fetch current CLOB ask for the token
   2. Skip if ask > limit_price + slippage (won't fill anyway)
-  3. Place a GTC limit order at the CLOB ask price
-  4. Try neg_risk=True first (all current Polymarket markets use the NegRisk
-     exchange). If order_version_mismatch, retry with neg_risk=False.
+  3. Place a GTC order via create_and_post_order
+  4. Try neg_risk=True first (most Polymarket markets use NegRisk exchange).
+     Fall back to neg_risk=False on order_version_mismatch.
+
+Migration notes vs V1:
+  - signature_type=0 (EOA/MetaMask) — NOT 1 (that's email/magic wallets)
+  - create_and_post_order() replaces separate create_order() + post_order()
+  - create_or_derive_api_key() replaces create_or_derive_api_creds()
+  - py-clob-client V1 is archived/non-functional; V2 is the official client
 """
 from __future__ import annotations
 
@@ -25,10 +31,10 @@ SLIPPAGE   = 0.005      # 0.5% — how much above limit we'll still accept
 
 
 class LiveTrader:
-    """Places real limit orders on Polymarket CLOB via py-clob-client."""
+    """Places real limit orders on Polymarket CLOB via py-clob-client-v2."""
 
     def __init__(self, private_key: str):
-        from py_clob_client.client import ClobClient
+        from py_clob_client_v2 import ClobClient
         from eth_account import Account
 
         wallet_address = Account.from_key(private_key).address
@@ -38,12 +44,12 @@ class LiveTrader:
             host=CLOB_HOST,
             chain_id=CHAIN_ID,
             key=private_key,
-            signature_type=1,   # POLY_PROXY — standard for MetaMask/browser wallets
+            signature_type=0,   # EOA — correct for MetaMask / direct private key wallets
             funder=wallet_address,
         )
 
         try:
-            creds = self._client.create_or_derive_api_creds()
+            creds = self._client.create_or_derive_api_key()
             self._client.set_api_creds(creds)
             logger.info("LiveTrader: API credentials ready ✓")
         except Exception as exc:
@@ -60,11 +66,11 @@ class LiveTrader:
     ) -> Optional[Decimal]:
         """
         1. Check current CLOB ask — skip if too far above limit.
-        2. Place GTC order at CLOB ask (ensures immediate fill).
+        2. Place GTC order via create_and_post_order.
         3. Try neg_risk=True first, fall back to False on version_mismatch.
         Returns actual fill price or None.
         """
-        from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
+        from py_clob_client_v2 import OrderArgs, OrderType, PartialCreateOrderOptions
 
         token_id = self._resolve_token(market_id, side)
         limit_f  = float(limit_price)
@@ -103,8 +109,7 @@ class LiveTrader:
         )
 
         # ── Step 3: place order — try neg_risk=True, fall back to False ───────
-        loop = asyncio.get_running_loop()
-
+        loop    = asyncio.get_running_loop()
         _client = self._client
         _token  = token_id
         _price  = order_price
@@ -113,21 +118,18 @@ class LiveTrader:
         for neg_risk in (True, False):
             try:
                 _neg = neg_risk
-                order = await loop.run_in_executor(
+                resp = await loop.run_in_executor(
                     None,
-                    lambda: _client.create_order(
+                    lambda: _client.create_and_post_order(
                         OrderArgs(
                             token_id=_token,
                             price=_price,
                             size=_shares,
                             side="BUY",
                         ),
-                        PartialCreateOrderOptions(neg_risk=_neg),
+                        options=PartialCreateOrderOptions(neg_risk=_neg),
+                        order_type=OrderType.GTC,
                     )
-                )
-                resp = await loop.run_in_executor(
-                    None,
-                    lambda: _client.post_order(order, OrderType.GTC)
                 )
 
                 if resp and resp.get("success"):
@@ -138,11 +140,11 @@ class LiveTrader:
                     )
                     return Decimal(str(order_price))
 
-                # Check if it's specifically a version mismatch → retry with other flag
+                # Version mismatch in the response body → retry with other flag
                 err = str(resp) if resp else ""
                 if "order_version_mismatch" in err:
                     logger.debug(
-                        f"LiveTrader: version mismatch with neg_risk={neg_risk}, retrying…"
+                        f"LiveTrader: version mismatch (neg_risk={neg_risk}), retrying…"
                     )
                     continue
 
@@ -153,13 +155,15 @@ class LiveTrader:
                 err = str(exc)
                 if "order_version_mismatch" in err:
                     logger.debug(
-                        f"LiveTrader: version mismatch with neg_risk={neg_risk}, retrying…"
+                        f"LiveTrader: version mismatch exc (neg_risk={neg_risk}), retrying…"
                     )
                     continue
                 logger.error(f"LiveTrader: order error: {exc}")
                 return None
 
-        logger.warning(f"LiveTrader: order failed on both neg_risk values — skipping")
+        logger.warning(
+            f"LiveTrader: order failed on both neg_risk values for {token_id[:12]}…"
+        )
         return None
 
     @staticmethod
