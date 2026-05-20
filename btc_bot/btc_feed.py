@@ -2,9 +2,9 @@
 Real-time BTC price feed.
 
 Sources tried in order:
-  1. CoinGecko REST   — poll every 6s, works everywhere, no auth needed
-  2. Kraken WebSocket — lower latency if REST fails
-  3. Binance REST     — final fallback (public endpoint, no WebSocket)
+  1. Kraken REST    — poll every 10s, no rate limits on public endpoint
+  2. CoinGecko REST — fallback, rate-limited to ~30 req/min on free tier
+  3. Binance.US REST — final fallback
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class BTCFeed:
     _BINANCE_REST  = "https://api.binance.us/api/v3/ticker/price"
     _KRAKEN_REST   = "https://api.kraken.com/0/public/Ticker"
 
-    def __init__(self, window: int = 60, poll_interval: float = 6.0):
+    def __init__(self, window: int = 60, poll_interval: float = 10.0):
         self._price: Optional[float] = None
         self._history: deque[float] = deque(maxlen=window)
         self._callbacks: list = []
@@ -110,23 +110,24 @@ class BTCFeed:
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        logger.info("BTCFeed: starting REST polling (CoinGecko → Kraken → Binance.US)")
+        logger.info("BTCFeed: starting REST polling (Kraken → CoinGecko → Binance.US)")
         async with httpx.AsyncClient() as http:
             consecutive_failures = 0
             while not stop_event.is_set():
-                price = await self._fetch_coingecko(http)
+                # Try Kraken first — no rate limit on public REST endpoint
+                price = await self._fetch_kraken(http)
                 if price:
-                    if self._source != "coingecko":
-                        logger.info(f"BTCFeed: using CoinGecko — ${price:,.0f}")
-                    self._source = "coingecko"
+                    if self._source != "kraken":
+                        logger.info(f"BTCFeed: using Kraken REST — ${price:,.0f}")
+                    self._source = "kraken"
                     consecutive_failures = 0
                     await self._emit(price)
                 else:
-                    price = await self._fetch_kraken(http)
+                    price = await self._fetch_coingecko(http)
                     if price:
-                        if self._source != "kraken":
-                            logger.info(f"BTCFeed: using Kraken REST — ${price:,.0f}")
-                        self._source = "kraken"
+                        if self._source != "coingecko":
+                            logger.info(f"BTCFeed: using CoinGecko — ${price:,.0f}")
+                        self._source = "coingecko"
                         consecutive_failures = 0
                         await self._emit(price)
                     else:
