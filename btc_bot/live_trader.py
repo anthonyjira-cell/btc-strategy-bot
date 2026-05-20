@@ -4,14 +4,13 @@ Live trader: executes real orders on Polymarket CLOB.
 Activated when LIVE_TRADING=true env var is set.
 Requires POLY_PRIVATE_KEY env var (your wallet's private key).
 
-Position size is controlled by LIVE_POSITION_SIZE (default $5 per trade).
-With $99 and max 6 positions at $5 each = $60 max deployed at once.
+Automatically detects neg_risk market type to avoid order_version_mismatch.
 """
 from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
-from typing import Optional
+from typing import Dict, Optional
 
 from loguru import logger
 
@@ -25,17 +24,22 @@ class LiveTrader:
     """Places real limit orders on Polymarket CLOB via py-clob-client."""
 
     def __init__(self, private_key: str):
-        # Import here so missing package only errors if live trading is enabled
         from py_clob_client.client import ClobClient
+        from eth_account import Account
 
+        # Derive wallet address from private key
+        wallet_address = Account.from_key(private_key).address
+        logger.info(f"LiveTrader: wallet address {wallet_address}")
+
+        # Try signature_type=1 (POLY_PROXY) — used by most Polymarket web users
         self._client = ClobClient(
             host=CLOB_HOST,
             chain_id=CHAIN_ID,
             key=private_key,
-            signature_type=0,   # EOA (standard MetaMask-style wallet)
+            signature_type=1,   # POLY_PROXY (MetaMask / browser wallet)
+            funder=wallet_address,
         )
 
-        # Derive API credentials from the private key (one-time per session)
         try:
             creds = self._client.create_or_derive_api_creds()
             self._client.set_api_creds(creds)
@@ -44,18 +48,20 @@ class LiveTrader:
             logger.error(f"LiveTrader: credential setup failed: {exc}")
             raise RuntimeError(f"LiveTrader init failed: {exc}") from exc
 
-        self._loop = asyncio.get_event_loop()
+        # Cache neg_risk per token so we don't retry every time
+        self._neg_risk_cache: Dict[str, bool] = {}
 
     async def fill(
         self,
         market_id: str,
         side: Side,
         limit_price: Decimal,
-        size: Decimal,          # size in USD → converted to shares
+        size: Decimal,
     ) -> Optional[Decimal]:
         """
-        Place a real GTC limit order.  Returns limit_price on success, None on failure.
-        size is dollars; converts to shares = dollars / price.
+        Place a real GTC limit order.
+        Auto-detects neg_risk by trying False then True if version_mismatch.
+        Returns actual fill price on success, None on failure.
         """
         from py_clob_client.clob_types import OrderArgs, OrderType
 
@@ -67,37 +73,58 @@ class LiveTrader:
             logger.warning(f"LiveTrader: order too small ({shares} shares), skipping")
             return None
 
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=price_f,
-            size=shares,
-            side="BUY",
-        )
+        # Determine which neg_risk values to try
+        if token_id in self._neg_risk_cache:
+            neg_risk_values = [self._neg_risk_cache[token_id]]
+        else:
+            neg_risk_values = [False, True]  # try both, cache winner
 
-        try:
-            # py-clob-client is synchronous — run in thread executor
-            order = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self._client.create_order(order_args)
-            )
-            resp = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self._client.post_order(order, OrderType.GTC)
-            )
+        loop = asyncio.get_event_loop()
 
-            if resp and resp.get("success"):
-                logger.info(
-                    f"LiveTrader: ✅ ORDER PLACED {side.value} "
-                    f"token={token_id[:12]}… "
-                    f"price={price_f:.4f} shares={shares:.2f} "
-                    f"(~${float(size):.2f})"
+        for neg_risk in neg_risk_values:
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=price_f,
+                size=shares,
+                side="BUY",
+                neg_risk=neg_risk,
+            )
+            try:
+                order = await loop.run_in_executor(
+                    None, lambda: self._client.create_order(order_args)
                 )
-                return limit_price
-            else:
+                resp = await loop.run_in_executor(
+                    None, lambda: self._client.post_order(order, OrderType.GTC)
+                )
+
+                if resp and resp.get("success"):
+                    self._neg_risk_cache[token_id] = neg_risk
+                    logger.info(
+                        f"LiveTrader: ✅ ORDER PLACED {side.value} "
+                        f"token={token_id[:12]}… "
+                        f"price={price_f:.4f} shares={shares:.2f} "
+                        f"neg_risk={neg_risk} (~${float(size):.2f})"
+                    )
+                    return limit_price
+
+                err_str = str(resp)
+                if "order_version_mismatch" in err_str:
+                    logger.debug(f"LiveTrader: version mismatch with neg_risk={neg_risk}, trying other value")
+                    continue  # try the other neg_risk value
+
                 logger.warning(f"LiveTrader: order rejected: {resp}")
                 return None
 
-        except Exception as exc:
-            logger.error(f"LiveTrader: order error: {exc}")
-            return None
+            except Exception as exc:
+                err_str = str(exc)
+                if "order_version_mismatch" in err_str:
+                    logger.debug(f"LiveTrader: version mismatch with neg_risk={neg_risk}, trying other value")
+                    continue
+                logger.error(f"LiveTrader: order error: {exc}")
+                return None
+
+        logger.warning(f"LiveTrader: order_version_mismatch for both neg_risk values on {token_id[:16]}")
+        return None
 
     @staticmethod
     def _resolve_token(market_id: str, side: Side) -> str:

@@ -33,6 +33,7 @@ MAX_OPEN          = 6                 # max concurrent open positions
 HEDGE_TIMEOUT     = 10.0             # seconds to wait for hedge fill
 DIRECTIONAL_STOP  = Decimal("0.05")  # close directional if loss > 5%
 ARB_COOLDOWN      = 3600             # seconds before re-entering same market (1 hour)
+NEAR_SETTLED      = Decimal("0.05")  # skip markets where one side < 5% (near-settled)
 
 
 class BTCStrategy:
@@ -97,6 +98,10 @@ class BTCStrategy:
             return
 
         if len(self._positions) >= MAX_OPEN:
+            return
+
+        # ── Skip near-settled markets (one side < 5%) ────────────────────────
+        if market.yes_ask < NEAR_SETTLED or market.no_ask < NEAR_SETTLED:
             return
 
         # ── Pure arb mode ─────────────────────────────────────────────────────
