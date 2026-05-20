@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import Optional
 
 import httpx
 from loguru import logger
@@ -48,7 +48,6 @@ class LiveTrader:
         except Exception as exc:
             raise RuntimeError(f"LiveTrader init failed: {exc}") from exc
 
-        self._neg_risk_cache: Dict[str, bool] = {}
         self._http = httpx.AsyncClient(timeout=5.0)
 
     async def fill(
@@ -105,13 +104,7 @@ class LiveTrader:
         # ── Step 3: place order, auto-detect neg_risk ─────────────────────────
         loop = asyncio.get_running_loop()
 
-        if token_id in self._neg_risk_cache:
-            neg_risk_values = [self._neg_risk_cache[token_id]]
-        else:
-            neg_risk_values = [False, True]
-
-        for neg_risk in neg_risk_values:
-            try:
+        try:
                 # Capture locals explicitly to avoid closure issues in executor
                 _client  = self._client
                 _token   = token_id
@@ -126,7 +119,6 @@ class LiveTrader:
                         price=_price,
                         size=_shares,
                         side="BUY",
-                        neg_risk=_neg,
                     ))
                 )
                 resp = await loop.run_in_executor(
@@ -135,31 +127,18 @@ class LiveTrader:
                 )
 
                 if resp and resp.get("success"):
-                    self._neg_risk_cache[token_id] = neg_risk
                     logger.info(
                         f"LiveTrader: ✅ ORDER PLACED {side.value} "
-                        f"{token_id[:12]}… @ {order_price:.4f} "
-                        f"x{shares:.1f} shares neg_risk={neg_risk}"
+                        f"{token_id[:12]}… @ {order_price:.4f} x{shares:.1f} shares"
                     )
                     return Decimal(str(order_price))
-
-                err_str = str(resp)
-                if "order_version_mismatch" in err_str:
-                    logger.debug(f"LiveTrader: version mismatch neg_risk={neg_risk}, retrying…")
-                    continue
 
                 logger.warning(f"LiveTrader: order rejected — {resp}")
                 return None
 
-            except Exception as exc:
-                if "order_version_mismatch" in str(exc):
-                    logger.debug(f"LiveTrader: version mismatch neg_risk={neg_risk}, retrying…")
-                    continue
-                logger.error(f"LiveTrader: order error: {exc}")
-                return None
-
-        logger.warning(f"LiveTrader: version mismatch on both neg_risk values — {token_id[:16]}")
-        return None
+        except Exception as exc:
+            logger.error(f"LiveTrader: order error: {exc}")
+            return None
 
     @staticmethod
     def _resolve_token(market_id: str, side: Side) -> str:
