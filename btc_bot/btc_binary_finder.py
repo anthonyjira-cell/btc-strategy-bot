@@ -134,8 +134,10 @@ class BTCBinaryFinder:
             dn_r.raise_for_status()
 
             def _best(book: dict, fallback: Decimal) -> Decimal:
+                # Polymarket CLOB sorts asks HIGHEST-FIRST (descending),
+                # so asks[-1] is the best (lowest) ask — the taker fill price.
                 asks = book.get("asks", [])
-                return Decimal(str(asks[0]["price"])) if asks else fallback
+                return Decimal(str(asks[-1]["price"])) if asks else fallback
 
             return (
                 _best(up_r.json(),  Decimal("0.5")),

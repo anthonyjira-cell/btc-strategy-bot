@@ -168,8 +168,9 @@ class MarketFinder:
             no_resp.raise_for_status()
 
             def _best_ask(book: dict, fallback: Decimal) -> Decimal:
+                # Polymarket CLOB sorts asks descending — asks[-1] is best ask
                 asks = book.get("asks", [])
-                return Decimal(str(asks[0]["price"])) if asks else fallback
+                return Decimal(str(asks[-1]["price"])) if asks else fallback
 
             market.yes_ask = _best_ask(yes_resp.json(), market.yes_ask)
             market.no_ask  = _best_ask(no_resp.json(),  market.no_ask)
