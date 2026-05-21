@@ -174,10 +174,14 @@ class BTCStrategy:
 
         if btc_up:
             token_price = float(window.up_ask)
+            if token_price <= 0:
+                return   # no liquidity — empty book fallback
             edge        = fair - token_price
             side_label  = "UP"
         else:
             token_price = float(window.down_ask)
+            if token_price <= 0:
+                return   # no liquidity — empty book fallback
             fair        = 1.0 - (0.5 - (fair - 0.5))   # mirror for DOWN direction
             fair        = dislocation_fair_prob(abs(delta_pct), minutes_left)
             edge        = fair - token_price
@@ -237,6 +241,8 @@ class BTCStrategy:
             return
 
         token_price = float(window.up_ask) if btc_up else float(window.down_ask)
+        if token_price <= 0:
+            return   # no liquidity — empty book fallback, don't trade
         edge        = fair - token_price
         side_label  = "UP" if btc_up else "DOWN"
 

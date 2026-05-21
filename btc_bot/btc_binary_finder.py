@@ -124,7 +124,10 @@ class BTCBinaryFinder:
     async def _fetch_clob_asks(
         self, up_id: str, down_id: str
     ) -> Tuple[Decimal, Decimal]:
-        """Get best asks from CLOB orderbook for UP and DOWN tokens."""
+        """Get best asks from CLOB orderbook for UP and DOWN tokens.
+        Returns Decimal('0') for a side when the book is empty (no real ask).
+        Strategy code treats 0 as 'no liquidity — skip trade'.
+        """
         try:
             up_r, dn_r = await asyncio.gather(
                 self._http.get(f"{CLOB_BASE}/book", params={"token_id": up_id}),
@@ -133,19 +136,20 @@ class BTCBinaryFinder:
             up_r.raise_for_status()
             dn_r.raise_for_status()
 
-            def _best(book: dict, fallback: Decimal) -> Decimal:
+            def _best(book: dict) -> Decimal:
                 # Polymarket CLOB sorts asks HIGHEST-FIRST (descending),
                 # so asks[-1] is the best (lowest) ask — the taker fill price.
+                # Return 0 if book is empty — signals no liquidity to caller.
                 asks = book.get("asks", [])
-                return Decimal(str(asks[-1]["price"])) if asks else fallback
+                return Decimal(str(asks[-1]["price"])) if asks else Decimal("0")
 
             return (
-                _best(up_r.json(),  Decimal("0.5")),
-                _best(dn_r.json(),  Decimal("0.5")),
+                _best(up_r.json()),
+                _best(dn_r.json()),
             )
         except Exception as exc:
             logger.debug(f"BTCBinary: CLOB ask fetch error: {exc}")
-            return Decimal("0.5"), Decimal("0.5")
+            return Decimal("0"), Decimal("0")
 
     async def close(self) -> None:
         await self._http.aclose()
