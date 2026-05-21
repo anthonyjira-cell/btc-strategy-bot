@@ -35,8 +35,9 @@ def _get_redis():
     if not url:
         return None
     try:
-        from upstash_redis import Redis
-        _redis = Redis.from_env()
+        import redis as redis_lib
+        _redis = redis_lib.from_url(url, decode_responses=True, socket_timeout=5)
+        _redis.ping()   # verify connection
         logger.info("StateStore: using Upstash Redis ✓")
         return _redis
     except Exception as exc:
