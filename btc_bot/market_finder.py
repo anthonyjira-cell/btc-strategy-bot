@@ -23,12 +23,9 @@ from btc_bot.models import BTCMarket
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE  = "https://clob.polymarket.com"
 
-# Keywords that identify BTC direction markets
+# Keywords that identify BTC/Bitcoin markets — must contain bitcoin or btc
 BTC_KEYWORDS = [
-    "bitcoin", "btc", "will btc", "btc up", "btc down",
-    "bitcoin up", "bitcoin down", "higher", "lower",
-    "reach", "exceed", "above", "below", "end above", "end below",
-    "close above", "close below", "hit", "touch",
+    "bitcoin", "btc",
 ]
 
 # Market selection parameters

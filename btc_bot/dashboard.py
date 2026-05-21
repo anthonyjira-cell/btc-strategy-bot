@@ -46,8 +46,8 @@ _HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1><span class="dot"></span>BTC Strategy <span style="color:#1f6feb;font-size:.8rem">PAPER</span></h1>
-<div class="sub">Hybrid arb / market-making / hedging on Polymarket BTC markets</div>
+<h1><span class="dot"></span>BTC Strategy <span id="mode-badge" style="color:#f85149;font-size:.8rem">LIVE</span></h1>
+<div class="sub">5-min BTC Up/Down binary dislocation strategy on Polymarket</div>
 
 <div class="stats">
   <div>BTC Price: <span id="btc">—</span> <span id="src" style="font-size:.7rem;color:#8b949e"></span></div>
