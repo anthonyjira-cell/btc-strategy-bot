@@ -46,7 +46,8 @@ DISLOC_TREND_MIN      = 0.05   # momentum threshold for trend agreement [-1,+1]
 DIRECT_SECONDS_LEFT   = 30     # only fire in final 30s
 DIRECT_MIN_CONFIDENCE = 0.45   # composite_confidence = fair_prob - 0.5
 DIRECT_BTC_CONFIRM    = 0.03   # % BTC must confirm direction
-DIRECT_MAX_BET        = Decimal("8.00")  # cap directional bets — bad risk/reward at high prices
+DIRECT_MAX_BET        = Decimal("8.00")   # cap directional bets — bad risk/reward at high prices
+DISLOC_MAX_BET        = Decimal("12.00")  # cap dislocation bets — Kelly at mid-range can hit $18-25
 
 # Pure arb
 ARB_MIN_SPREAD = Decimal("0.02")
@@ -216,7 +217,8 @@ class BTCStrategy:
             f"Δbtc={delta_pct:+.3f}% {minutes_left:.1f}min left | "
             f"fair={fair:.3f} mkt={token_price:.3f} edge={edge:.3f}"
         )
-        await self._place_binary(window, btc_up, edge, token_price, "dislocation")
+        await self._place_binary(window, btc_up, edge, token_price, "dislocation",
+                                 max_bet=DISLOC_MAX_BET)
 
     # ── Engine 2: Directional (final 30s) ────────────────────────────────────
 
