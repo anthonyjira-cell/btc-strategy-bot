@@ -45,7 +45,7 @@ DISLOC_TREND_MIN      = 0.05   # momentum threshold for trend agreement [-1,+1]
 # Directional engine (end of window)
 DIRECT_SECONDS_LEFT   = 30     # only fire in final 30s
 DIRECT_MIN_CONFIDENCE = 0.45   # composite_confidence = fair_prob - 0.5
-DIRECT_BTC_CONFIRM    = 0.10   # % BTC must confirm — needs ~95%+ stat win prob
+DIRECT_BTC_CONFIRM    = 0.06   # % BTC must confirm — filters weakest signals
 DIRECT_MAX_BET        = Decimal("8.00")  # cap directional bets — bad risk/reward at high prices
 
 # Pure arb
