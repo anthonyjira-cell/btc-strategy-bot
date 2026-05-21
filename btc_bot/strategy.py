@@ -206,15 +206,9 @@ class BTCStrategy:
             )
             return
 
-        # Trend must agree
-        trend_ok = (btc_up and self._momentum >= DISLOC_TREND_MIN) or \
-                   (not btc_up and self._momentum <= -DISLOC_TREND_MIN)
-        if not trend_ok:
-            logger.debug(
-                f"Strategy: DISLOC skip — trend disagrees "
-                f"(momentum={self._momentum:.3f}, btc_up={btc_up})"
-            )
-            return
+        # Direction is already confirmed by delta sign — momentum check removed.
+        # With WebSocket (60 history samples ≈ 12-30s), the old 5-min-calibrated
+        # threshold was blocking valid trades by 0.001-0.002 momentum units.
 
         logger.info(
             f"Strategy: 🔥 DISLOCATION {side_label} | "
