@@ -39,15 +39,18 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 # Dislocation engine
 DISLOC_MIN_BTC_MOVE   = 0.05   # % BTC must move to trigger dislocation check
-DISLOC_MIN_EDGE       = 0.02   # token must be 2%+ below fair value
-DISLOC_TREND_MIN      = 0.05   # momentum threshold for trend agreement [-1,+1]
+DISLOC_MIN_EDGE       = 0.05   # token must be 5%+ below fair value (raised from 2% to reduce marginal trades)
+DISLOC_MIN_TOKEN      = 0.33   # don't buy tokens below this — market already moved too far, formula overestimates
+DISLOC_MAX_BET        = Decimal("8.00")   # cap dislocation bets
 
 # Directional engine (end of window)
 DIRECT_SECONDS_LEFT   = 30     # only fire in final 30s
 DIRECT_MIN_CONFIDENCE = 0.45   # composite_confidence = fair_prob - 0.5
 DIRECT_BTC_CONFIRM    = 0.03   # % BTC must confirm direction
-DIRECT_MAX_BET        = Decimal("8.00")   # cap directional bets — bad risk/reward at high prices
-DISLOC_MAX_BET        = Decimal("12.00")  # cap dislocation bets — Kelly at mid-range can hit $18-25
+DIRECT_MAX_BET        = Decimal("5.00")   # cap directional bets
+
+# Loss cooldown — skip N windows after a loss to avoid chasing reversals
+LOSS_COOLDOWN_WINDOWS = 2      # wait 2 windows (10 min) after any loss before trading again
 
 # Pure arb
 ARB_MIN_SPREAD = Decimal("0.02")
@@ -106,6 +109,7 @@ class BTCStrategy:
         self._traded_window: int = 0   # last window we traded in (avoid doubles)
         self._last_arb:  Dict[str, float] = {}
         self._positions: Dict[str, dict]  = {}
+        self._loss_cooldown_until: int = 0  # window_start timestamp, don't trade until after this
 
         # Persistence
         saved = state_store.load()
@@ -164,6 +168,9 @@ class BTCStrategy:
             return   # already traded this window
         if len(self._positions) >= MAX_OPEN:
             return
+        if window.window_start <= self._loss_cooldown_until:
+            logger.debug(f"Strategy: loss cooldown active — skipping window")
+            return
 
         delta_pct = (self._btc_price - self._window_open) / self._window_open * 100
         btc_up    = delta_pct > 0
@@ -190,12 +197,18 @@ class BTCStrategy:
             token_price = float(window.up_ask)
             if token_price <= 0:
                 return   # no liquidity — empty book fallback
+            if token_price < DISLOC_MIN_TOKEN:
+                logger.debug(f"Strategy: DISLOC skip — UP token {token_price:.3f} below min {DISLOC_MIN_TOKEN}")
+                return
             edge        = fair - token_price
             side_label  = "UP"
         else:
             token_price = float(window.down_ask)
             if token_price <= 0:
                 return   # no liquidity — empty book fallback
+            if token_price < DISLOC_MIN_TOKEN:
+                logger.debug(f"Strategy: DISLOC skip — DOWN token {token_price:.3f} below min {DISLOC_MIN_TOKEN}")
+                return
             fair        = 1.0 - (0.5 - (fair - 0.5))   # mirror for DOWN direction
             fair        = dislocation_fair_prob(abs(delta_pct), minutes_left)
             edge        = fair - token_price
@@ -407,6 +420,16 @@ class BTCStrategy:
                         "net":     float(actual_pnl),
                         "cum_pnl": float(self._cum_pnl),
                     })
+                    # After a loss, sit out the next N windows
+                    if not won:
+                        self._loss_cooldown_until = (
+                            pos["window_end"]
+                            + LOSS_COOLDOWN_WINDOWS * 300
+                        )
+                        logger.info(
+                            f"Strategy: 🛑 loss cooldown — skipping next "
+                            f"{LOSS_COOLDOWN_WINDOWS} windows"
+                        )
                     del self._pending[slug]
                     state_store.save(self._cum_pnl, self._trades, self._pending)
 
