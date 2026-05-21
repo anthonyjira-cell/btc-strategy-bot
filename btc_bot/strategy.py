@@ -45,7 +45,8 @@ DISLOC_TREND_MIN      = 0.05   # momentum threshold for trend agreement [-1,+1]
 # Directional engine (end of window)
 DIRECT_SECONDS_LEFT   = 30     # only fire in final 30s
 DIRECT_MIN_CONFIDENCE = 0.45   # composite_confidence = fair_prob - 0.5
-DIRECT_BTC_CONFIRM    = 0.03   # % BTC must confirm direction
+DIRECT_BTC_CONFIRM    = 0.10   # % BTC must confirm — needs ~95%+ stat win prob
+DIRECT_MAX_BET        = Decimal("8.00")  # cap directional bets — bad risk/reward at high prices
 
 # Pure arb
 ARB_MIN_SPREAD = Decimal("0.02")
@@ -257,7 +258,10 @@ class BTCStrategy:
             f"Δbtc={delta_pct:+.3f}% {window.seconds_remaining:.0f}s left | "
             f"confidence={confidence:.3f} edge={edge:.3f}"
         )
-        await self._place_binary(window, btc_up, edge, token_price, "directional")
+        await self._place_binary(
+            window, btc_up, edge, token_price, "directional",
+            max_bet=DIRECT_MAX_BET,
+        )
 
     # ── Engine 3: Pure arb (general markets) ─────────────────────────────────
 
@@ -286,12 +290,15 @@ class BTCStrategy:
         edge: float,
         token_price: float,
         engine: str,
+        max_bet: Optional[Decimal] = None,
     ) -> None:
         # Pass token ID directly — _resolve_token returns it as-is (no colon)
         token_id    = window.up_token_id if btc_up else window.down_token_id
         side        = Side.YES   # always buying a token (UP or DOWN)
         limit_price = window.up_ask if btc_up else window.down_ask
         size        = kelly_size(edge, token_price, self._bankroll)
+        if max_bet is not None:
+            size = min(size, max_bet)
 
         if size < Decimal("1"):
             logger.debug(f"Strategy: Kelly size too small ({size}), skipping")
