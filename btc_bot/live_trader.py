@@ -45,26 +45,39 @@ class LiveTrader:
         # to the deposit address shown on polymarket.com → Deposit dialog.
         import os
         funder = os.environ.get("POLY_FUNDER_ADDRESS", wallet_address)
-        # sig_type=3 = POLY_1271 (ERC-1271): for Polymarket deposit wallets
-        # which are smart contract proxies. EOA private key signs; the
-        # proxy contract's isValidSignature() verifies on-chain.
-        # This is the "deposit wallet flow" Polymarket requires for
-        # Rabby/MetaMask users who deposited via the Polymarket UI.
-        sig_type = 3 if funder != wallet_address else 0
-        logger.info(f"LiveTrader: funder={funder} sig_type={sig_type}")
-
-        self._client = ClobClient(
-            host=CLOB_HOST,
-            chain_id=CHAIN_ID,
-            key=private_key,
-            signature_type=sig_type,  # 2 = browser/proxy wallet, 0 = raw EOA
-            funder=funder,
-        )
+        logger.info(f"LiveTrader: funder={funder}")
 
         try:
-            creds = self._client.create_or_derive_api_key()
-            self._client.set_api_creds(creds)
-            logger.info("LiveTrader: API credentials ready ✓")
+            # Step 1: derive API credentials using raw EOA (sig_type=0).
+            # The API key must be associated with the EOA address because
+            # the CLOB extracts the ECDSA signer from order signatures and
+            # checks it matches the API key address.
+            eoa_client = ClobClient(
+                host=CLOB_HOST,
+                chain_id=CHAIN_ID,
+                key=private_key,
+                signature_type=0,
+                funder=wallet_address,
+            )
+            creds = eoa_client.create_or_derive_api_key()
+            logger.info(f"LiveTrader: API key derived (EOA) ✓")
+
+            # Step 2: build the trading client with sig_type=3 (ERC-1271)
+            # + deposit wallet as funder, using the EOA-derived creds.
+            # sig_type=3 = POLY_1271: deposit wallet is a smart contract;
+            # isValidSignature() verifies the EOA signature on-chain.
+            sig_type = 3 if funder != wallet_address else 0
+            logger.info(f"LiveTrader: sig_type={sig_type}")
+
+            self._client = ClobClient(
+                host=CLOB_HOST,
+                chain_id=CHAIN_ID,
+                key=private_key,
+                creds=creds,
+                signature_type=sig_type,
+                funder=funder,
+            )
+            logger.info("LiveTrader: trading client ready ✓")
         except Exception as exc:
             raise RuntimeError(f"LiveTrader init failed: {exc}") from exc
 
