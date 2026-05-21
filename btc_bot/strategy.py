@@ -114,13 +114,25 @@ class BTCStrategy:
 
     def on_window_start(self, window_start: int) -> None:
         """Called when a new 5-min window begins. Record opening BTC price."""
-        if window_start != self._window_id:
-            self._window_id   = window_start
-            self._window_open = self._btc_price
+        if window_start == self._window_id:
+            return
+        self._window_id   = window_start
+        self._window_open = self._btc_price
+
+        # If we're joining a window late (>120s elapsed), skip trading it.
+        # We don't know the real opening price, so delta calculations are wrong.
+        import time as _time
+        elapsed = _time.time() - window_start
+        if elapsed > 120:
+            self._traded_window = window_start   # block this window
             logger.info(
-                f"Strategy: 🕐 new window {window_start} | "
-                f"BTC open=${self._btc_price:,.0f}" if self._btc_price else
-                f"Strategy: 🕐 new window {window_start}"
+                f"Strategy: ⏭️  late join window {window_start} "
+                f"({elapsed:.0f}s elapsed) — waiting for next fresh window"
+            )
+        else:
+            logger.info(
+                f"Strategy: 🕐 new window | BTC open=${self._btc_price:,.0f}"
+                if self._btc_price else "Strategy: 🕐 new window"
             )
 
     # ── Engine 1: Dislocation ─────────────────────────────────────────────────
@@ -141,6 +153,14 @@ class BTCStrategy:
 
         delta_pct = (self._btc_price - self._window_open) / self._window_open * 100
         btc_up    = delta_pct > 0
+        minutes_left = window.minutes_remaining
+
+        logger.debug(
+            f"Strategy: Δbtc={delta_pct:+.3f}% "
+            f"{'UP' if btc_up else 'DOWN'} | "
+            f"UP@{float(window.up_ask):.3f} DOWN@{float(window.down_ask):.3f} | "
+            f"{minutes_left:.1f}min left"
+        )
 
         # Need minimum move to trigger
         if abs(delta_pct) < DISLOC_MIN_BTC_MOVE:
