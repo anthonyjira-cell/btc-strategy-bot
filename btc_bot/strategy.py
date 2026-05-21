@@ -20,15 +20,19 @@ Position sizing: Kelly formula capped at 25% of bankroll.
 """
 from __future__ import annotations
 
+import json
 import time
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+import httpx
 from loguru import logger
 
 from btc_bot.btc_binary_finder import BinaryWindow
 from btc_bot.models import BTCMarket, Side
 from btc_bot import state_store
+
+GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 
 # ── Parameters ────────────────────────────────────────────────────────────────
@@ -105,6 +109,8 @@ class BTCStrategy:
         saved = state_store.load()
         self._cum_pnl  = Decimal(str(saved.get("cum_pnl", 0)))
         self._trades:  List[dict] = saved.get("trades", [])
+        # Pending positions waiting for settlement — keyed by window slug
+        self._pending: Dict[str, dict] = saved.get("pending", {})
 
     # ── State updates ─────────────────────────────────────────────────────────
 
@@ -296,22 +302,23 @@ class BTCStrategy:
             return
 
         self._traded_window = window.window_start
-        expected_pnl = (Decimal(str(edge)) * size)
-        self._cum_pnl += expected_pnl
+        shares = float(size) / float(fill)
 
-        self._trades.append({
-            "time":    time.time(),
-            "market":  window.slug,
-            "type":    engine,
-            "net":     float(expected_pnl),
-            "cum_pnl": float(self._cum_pnl),
-        })
-        state_store.save(self._cum_pnl, self._trades)
+        # Don't record PnL yet — wait for actual resolution
+        self._pending[window.slug] = {
+            "slug":       window.slug,
+            "cost":       float(size),
+            "shares":     shares,
+            "window_end": window.window_end,
+            "is_up":      btc_up,
+            "engine":     engine,
+            "time":       time.time(),
+        }
+        state_store.save(self._cum_pnl, self._trades, self._pending)
 
         logger.info(
             f"Strategy: ✅ {engine.upper()} {'UP' if btc_up else 'DOWN'} "
-            f"@ {fill:.3f} size=${size} "
-            f"expected=${expected_pnl:.2f} | cum=${self._cum_pnl:.2f}"
+            f"@ {fill:.3f} x{shares:.1f} shares cost=${size} — pending settlement"
         )
 
     async def _enter_arb(self, market: BTCMarket) -> None:
@@ -335,12 +342,71 @@ class BTCStrategy:
             "net":     float(net),
             "cum_pnl": float(self._cum_pnl),
         })
-        state_store.save(self._cum_pnl, self._trades)
+        state_store.save(self._cum_pnl, self._trades, self._pending)
         logger.info(
             f"Strategy: ✅ ARB '{market.label}' "
             f"YES@{yes_fill:.3f} NO@{no_fill:.3f} "
             f"net=${net:.2f} | cum=${self._cum_pnl:.2f}"
         )
+
+    # ── Settlement — resolve pending positions against actual outcomes ─────────
+
+    async def settle_pending(self) -> None:
+        """
+        For each pending position whose window has expired, fetch the Gamma
+        market result and record actual PnL (win = shares×$1 − cost, loss = −cost).
+        Called every binary_loop cycle so settlements happen within ~10s of expiry.
+        """
+        now = time.time()
+        to_check = [p for p in self._pending.values() if p["window_end"] + 15 < now]
+        if not to_check:
+            return
+
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            for pos in to_check:
+                slug = pos["slug"]
+                try:
+                    resp = await http.get(
+                        f"{GAMMA_BASE}/markets", params={"slug": slug}
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if not data:
+                        continue
+                    m = data[0] if isinstance(data, list) else data
+
+                    if not m.get("closed"):
+                        continue   # not resolved yet — check next cycle
+
+                    raw_px = m.get("outcomePrices", '["0.5","0.5"]')
+                    prices = json.loads(raw_px) if isinstance(raw_px, str) else raw_px
+                    up_final = float(prices[0])   # 1.0 = UP won, 0.0 = UP lost
+
+                    won = (up_final >= 0.99) if pos["is_up"] else (up_final <= 0.01)
+                    actual_pnl = Decimal(str(
+                        round(pos["shares"] - pos["cost"], 4) if won
+                        else -pos["cost"]
+                    ))
+
+                    self._cum_pnl += actual_pnl
+                    self._trades.append({
+                        "time":    pos["time"],
+                        "market":  slug,
+                        "type":    pos["engine"],
+                        "net":     float(actual_pnl),
+                        "cum_pnl": float(self._cum_pnl),
+                    })
+                    del self._pending[slug]
+                    state_store.save(self._cum_pnl, self._trades, self._pending)
+
+                    logger.info(
+                        f"Strategy: {'✅ WIN' if won else '❌ LOSS'} "
+                        f"{slug} ({'UP' if pos['is_up'] else 'DOWN'}) "
+                        f"actual=${actual_pnl:.2f} | cum=${self._cum_pnl:.2f}"
+                    )
+
+                except Exception as exc:
+                    logger.debug(f"Strategy: settle error for {slug}: {exc}")
 
     # ── Dashboard ─────────────────────────────────────────────────────────────
 

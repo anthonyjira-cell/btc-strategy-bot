@@ -121,6 +121,8 @@ async def main() -> None:
                         f"spread={float(window.spread):.3f} "
                         f"{window.seconds_remaining:.0f}s left"
                     )
+                # Settle any positions whose windows have now closed
+                await strategy.settle_pending()
             except Exception as exc:
                 logger.warning(f"Main: binary_loop error: {exc}")
             await asyncio.sleep(BINARY_POLL_INTERVAL)

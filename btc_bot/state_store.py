@@ -40,22 +40,24 @@ def load() -> dict:
             logger.info(
                 f"StateStore: loaded from {path} | "
                 f"cum_pnl={data.get('cum_pnl', 0):.2f} | "
-                f"trades={len(data.get('trades', []))}"
+                f"trades={len(data.get('trades', []))} | "
+                f"pending={len(data.get('pending', {}))}"
             )
             return data
     except Exception as exc:
         logger.warning(f"StateStore: failed to load {path}: {exc}")
-    return {"cum_pnl": 0.0, "trades": []}
+    return {"cum_pnl": 0.0, "trades": [], "pending": {}}
 
 
-def save(cum_pnl: Decimal, trades: List[dict]) -> None:
+def save(cum_pnl: Decimal, trades: List[dict], pending: dict = None) -> None:
     """Persist current state to disk."""
     path = _get_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "cum_pnl": float(cum_pnl),
-            "trades": trades,
+            "trades":  trades,
+            "pending": pending or {},
         }
         path.write_text(json.dumps(data, indent=2))
     except Exception as exc:
