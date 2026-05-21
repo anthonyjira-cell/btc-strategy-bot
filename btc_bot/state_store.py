@@ -1,9 +1,13 @@
 """
-Persistent state store — saves/loads cumulative P&L and trade history
-to a JSON file so the bot survives Railway restarts.
+Persistent state store — saves/loads cumulative P&L, trade history,
+and pending positions.
 
-File location: STATE_FILE env var (default: /data/btc_bot_state.json).
-Railway persistent volumes mount at /data; falls back to ./state.json locally.
+Storage priority:
+  1. Upstash Redis  — if UPSTASH_REDIS_URL env var is set (survives redeploys)
+  2. Local JSON file — /data/btc_bot_state.json (Railway volume) or ./state.json
+
+Redis is preferred: free tier handles our ~10 writes/day easily, and state
+survives every redeploy without needing a Railway persistent volume.
 """
 from __future__ import annotations
 
@@ -15,9 +19,32 @@ from typing import List
 
 from loguru import logger
 
-_DEFAULT_PATH = "/data/btc_bot_state.json"
-_FALLBACK_PATH = "./state.json"
+_REDIS_KEY      = "btc_bot_state"
+_DEFAULT_PATH   = "/data/btc_bot_state.json"
+_FALLBACK_PATH  = "./state.json"
 
+# ── Redis client (lazy-initialised once) ─────────────────────────────────────
+
+_redis = None
+
+def _get_redis():
+    global _redis
+    if _redis is not None:
+        return _redis
+    url = os.environ.get("UPSTASH_REDIS_URL", "")
+    if not url:
+        return None
+    try:
+        from upstash_redis import Redis
+        _redis = Redis.from_env()
+        logger.info("StateStore: using Upstash Redis ✓")
+        return _redis
+    except Exception as exc:
+        logger.warning(f"StateStore: Redis init failed ({exc}) — falling back to file")
+        return None
+
+
+# ── File path helper ──────────────────────────────────────────────────────────
 
 def _get_path() -> Path:
     custom = os.environ.get("STATE_FILE")
@@ -31,8 +58,28 @@ def _get_path() -> Path:
         return Path(_FALLBACK_PATH)
 
 
+# ── Public API ────────────────────────────────────────────────────────────────
+
 def load() -> dict:
-    """Load saved state, return defaults if file doesn't exist or is corrupt."""
+    """Load saved state; return defaults if not found or corrupt."""
+    # Try Redis first
+    r = _get_redis()
+    if r is not None:
+        try:
+            raw = r.get(_REDIS_KEY)
+            if raw:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                logger.info(
+                    f"StateStore: loaded from Redis | "
+                    f"cum_pnl={data.get('cum_pnl', 0):.2f} | "
+                    f"trades={len(data.get('trades', []))} | "
+                    f"pending={len(data.get('pending', {}))}"
+                )
+                return data
+        except Exception as exc:
+            logger.warning(f"StateStore: Redis load failed ({exc}) — trying file")
+
+    # Fall back to file
     path = _get_path()
     try:
         if path.exists():
@@ -45,20 +92,33 @@ def load() -> dict:
             )
             return data
     except Exception as exc:
-        logger.warning(f"StateStore: failed to load {path}: {exc}")
+        logger.warning(f"StateStore: file load failed ({exc})")
+
     return {"cum_pnl": 0.0, "trades": [], "pending": {}}
 
 
 def save(cum_pnl: Decimal, trades: List[dict], pending: dict = None) -> None:
-    """Persist current state to disk."""
+    """Persist current state (Redis if available, else file)."""
+    data = {
+        "cum_pnl": float(cum_pnl),
+        "trades":  trades,
+        "pending": pending or {},
+    }
+    payload = json.dumps(data)
+
+    # Try Redis first
+    r = _get_redis()
+    if r is not None:
+        try:
+            r.set(_REDIS_KEY, payload)
+            return
+        except Exception as exc:
+            logger.warning(f"StateStore: Redis save failed ({exc}) — falling back to file")
+
+    # Fall back to file
     path = _get_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "cum_pnl": float(cum_pnl),
-            "trades":  trades,
-            "pending": pending or {},
-        }
-        path.write_text(json.dumps(data, indent=2))
+        path.write_text(payload)
     except Exception as exc:
-        logger.warning(f"StateStore: failed to save {path}: {exc}")
+        logger.warning(f"StateStore: file save failed ({exc})")
