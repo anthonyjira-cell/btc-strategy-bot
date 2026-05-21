@@ -152,8 +152,12 @@ class BTCStrategy:
         """
         self.on_window_start(window.window_start)
 
-        if self._btc_price is None or self._window_open is None:
+        if self._btc_price is None:
             return
+        # Late-set window_open if BTC price wasn't available when window started
+        if self._window_open is None:
+            self._window_open = self._btc_price
+            logger.debug(f"Strategy: late-set window_open=${self._btc_price:,.0f}")
         if self._traded_window == window.window_start:
             return   # already traded this window
         if len(self._positions) >= MAX_OPEN:
@@ -229,8 +233,10 @@ class BTCStrategy:
         """
         if window.seconds_remaining > DIRECT_SECONDS_LEFT:
             return
-        if self._btc_price is None or self._window_open is None:
+        if self._btc_price is None:
             return
+        if self._window_open is None:
+            self._window_open = self._btc_price
         if self._traded_window == window.window_start:
             return
         if len(self._positions) >= MAX_OPEN:

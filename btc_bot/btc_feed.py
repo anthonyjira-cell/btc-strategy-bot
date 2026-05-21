@@ -81,7 +81,13 @@ class BTCFeed:
         self._last_tick = _time.time()
         self._history.append(price)
         if self._source != source:
-            logger.info(f"BTCFeed: switched to {source} ✓")
+            prev, cur = self._source, source
+            # Only log meaningful transitions (not WS↔WS chatter)
+            if "ws" not in prev or "ws" not in cur:
+                if "ws" in cur:
+                    logger.info(f"BTCFeed: live via {cur} ✓")
+                else:
+                    logger.warning(f"BTCFeed: WS feeds stale — using {cur}")
         self._source = source
         for cb in self._callbacks:
             await cb(price)
