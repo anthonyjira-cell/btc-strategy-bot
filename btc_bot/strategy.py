@@ -113,6 +113,8 @@ class BTCStrategy:
         self._trades:  List[dict] = saved.get("trades", [])
         # Pending positions waiting for settlement — keyed by window slug
         self._pending: Dict[str, dict] = saved.get("pending", {})
+        # Write state immediately on startup so Redis key exists from boot
+        state_store.save(self._cum_pnl, self._trades, self._pending)
 
     # ── State updates ─────────────────────────────────────────────────────────
 
