@@ -1,18 +1,12 @@
 """
 Live trader: executes real orders on Polymarket CLOB using py-clob-client-v2.
 
-Flow per fill():
-  1. Fetch current CLOB ask for the token
-  2. Skip if ask > limit_price + slippage (won't fill anyway)
-  3. Place a GTC order via create_and_post_order
-  4. Try neg_risk=True first (most Polymarket markets use NegRisk exchange).
-     Fall back to neg_risk=False on order_version_mismatch.
+fill() receives the CLOB best ask fetched fresh by market_finder/arb_scanner
+and places the order at exactly that price — a taker order that fills immediately.
+No re-fetching of prices here; the caller is responsible for freshness.
 
-Migration notes vs V1:
-  - signature_type=0 (EOA/MetaMask) — NOT 1 (that's email/magic wallets)
-  - create_and_post_order() replaces separate create_order() + post_order()
-  - create_or_derive_api_key() replaces create_or_derive_api_creds()
-  - py-clob-client V1 is archived/non-functional; V2 is the official client
+Try neg_risk=True first (most Polymarket markets use NegRisk exchange).
+Fall back to neg_risk=False on order_version_mismatch or invalid_signature.
 """
 from __future__ import annotations
 
@@ -20,14 +14,12 @@ import asyncio
 from decimal import Decimal
 from typing import Optional
 
-import httpx
 from loguru import logger
 
 from btc_bot.models import Side
 
-CLOB_HOST  = "https://clob.polymarket.com"
-CHAIN_ID   = 137        # Polygon mainnet
-SLIPPAGE   = 0.005      # 0.5% — how much above limit we'll still accept
+CLOB_HOST = "https://clob.polymarket.com"
+CHAIN_ID  = 137  # Polygon mainnet
 
 
 class LiveTrader:
@@ -81,7 +73,6 @@ class LiveTrader:
         except Exception as exc:
             raise RuntimeError(f"LiveTrader init failed: {exc}") from exc
 
-        self._http = httpx.AsyncClient(timeout=5.0)
 
     async def fill(
         self,
@@ -98,31 +89,10 @@ class LiveTrader:
         """
         from py_clob_client_v2 import OrderArgs, OrderType, PartialCreateOrderOptions
 
-        token_id = self._resolve_token(market_id, side)
-        limit_f  = float(limit_price)
-
-        # ── Step 1: fetch current CLOB ask ───────────────────────────────────
-        try:
-            resp = await self._http.get(
-                f"{CLOB_HOST}/price",
-                params={"token_id": token_id, "side": "buy"},
-            )
-            resp.raise_for_status()
-            ask = float(resp.json().get("price", limit_f))
-        except Exception as exc:
-            logger.debug(f"LiveTrader: price fetch error: {exc} — using limit price")
-            ask = limit_f
-
-        # ── Step 2: price check ───────────────────────────────────────────────
-        if ask > limit_f + SLIPPAGE:
-            logger.debug(
-                f"LiveTrader: SKIP {side.value} {token_id[:12]}… "
-                f"ask={ask:.4f} > limit={limit_f:.4f}+slippage"
-            )
-            return None
-
-        # Use actual ask as order price so it fills immediately
-        order_price = ask
+        token_id    = self._resolve_token(market_id, side)
+        # limit_price IS the CLOB best ask fetched fresh by market_finder/arb_scanner.
+        # Place the order at exactly that price — it will match as a taker immediately.
+        order_price = float(limit_price)
         shares      = round(float(size) / order_price, 2)
 
         if shares < 1.0:
@@ -201,4 +171,4 @@ class LiveTrader:
         return market_id
 
     async def close(self) -> None:
-        await self._http.aclose()
+        pass  # nothing to clean up

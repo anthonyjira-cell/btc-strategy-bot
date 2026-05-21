@@ -1,18 +1,16 @@
 """
-Hybrid BTC arb / market-making / hedging strategy.
+Pure arb strategy — ONLY enters when YES ask + NO ask < 0.97 on the CLOB.
 
-Logic:
-  1. For each BTC Up/Down market, calculate fair YES probability from
-     BTC momentum + base rate.
-  2. If market price < fair value - edge_threshold → mispriced → enter.
-  3. On entry, immediately try to hedge with the opposite side.
-     - If hedge fills → locked arb, net = 1 - entry - hedge - fees
-     - If hedge doesn't fill → directional exposure, close if BTC moves our way
-  4. Also watch for pure arb: combined ask < (1 - min_spread).
+No directional bets. No fair-value assumptions. Only locked-in profit.
+
+Arb condition:
+  yes_ask + no_ask < (1 - FEE_RATE * 2)
+  → buy both sides → guaranteed $1 payout → net profit = spread - fees
+
+P&L is only recorded when BOTH legs confirm a fill. Never on order submission.
 """
 from __future__ import annotations
 
-import asyncio
 import time
 from decimal import Decimal
 from typing import Dict, List, Optional
@@ -24,240 +22,113 @@ from btc_bot import state_store
 
 
 # ── Strategy parameters ───────────────────────────────────────────────────────
-
-EDGE_THRESHOLD    = Decimal("0.02")   # enter when price < fair - 2%
-MIN_ARB_SPREAD    = Decimal("0.03")   # pure arb when combined < 0.97
-MAX_POSITION_SIZE = Decimal("100")    # $ per position (paper)
-FEE_RATE          = Decimal("0.005")  # 0.5% per leg
-MAX_OPEN          = 6                 # max concurrent open positions
-HEDGE_TIMEOUT     = 10.0             # seconds to wait for hedge fill
-DIRECTIONAL_STOP  = Decimal("0.05")  # close directional if loss > 5%
-ARB_COOLDOWN      = 3600             # seconds before re-entering same market (1 hour)
-NEAR_SETTLED      = Decimal("0.05")  # skip markets where one side < 5% (near-settled)
+MIN_ARB_SPREAD = Decimal("0.03")   # need 3%+ spread (fees ~1%, want 2%+ net profit)
+FEE_RATE       = Decimal("0.005")  # 0.5% per leg
+MAX_OPEN       = 6                 # max concurrent open positions
+ARB_COOLDOWN   = 3600              # seconds before re-entering same market
+NEAR_SETTLED   = Decimal("0.03")   # skip markets where one side < 3%
 
 
 class BTCStrategy:
     """
-    Runs the hybrid strategy. Call `on_price_update()` whenever BTC price
-    changes and `on_market_update()` when market prices refresh.
+    Pure arb strategy. Only enters when combined CLOB asks < 0.97.
+    Both legs are placed at the current best ask — taker orders that fill immediately.
+    P&L is only counted when both fills are confirmed.
     """
 
-    def __init__(self, paper_trader, position_size: Decimal = MAX_POSITION_SIZE):
-        self._paper     = paper_trader
-        self._size      = position_size
+    def __init__(self, trader, position_size: Decimal = Decimal("15")):
+        self._trader = trader
+        self._size   = position_size
         self._positions: Dict[str, Position] = {}
+        self._last_entry: Dict[str, float]   = {}
+
+        # BTC price (kept for dashboard compatibility — not used in trading logic)
         self._btc_price: Optional[float] = None
         self._momentum:  float = 0.0
-        self._last_entry: Dict[str, float] = {}  # cooldown tracker per market
 
-        # Load persisted state
         saved = state_store.load()
         self._cum_pnl = Decimal(str(saved.get("cum_pnl", 0)))
         self._trades: List[dict] = saved.get("trades", [])
-
-    # ── Callbacks ─────────────────────────────────────────────────────────────
 
     def update_btc(self, price: float, momentum: float) -> None:
         self._btc_price = price
         self._momentum  = momentum
 
     def _on_cooldown(self, market_id: str) -> bool:
-        """Returns True if this market was entered recently (within ARB_COOLDOWN)."""
         return time.time() - self._last_entry.get(market_id, 0) < ARB_COOLDOWN
 
     def _record_entry(self, market_id: str) -> None:
         self._last_entry[market_id] = time.time()
 
-    async def evaluate_arb_only(self, market: BTCMarket) -> None:
-        """
-        Pure arb check for non-BTC markets — no directional logic.
-        Only enters if spread >= MIN_ARB_SPREAD and not on cooldown.
-        """
-        mid = market.market_id
-        if mid in self._positions:
-            await self._check_position(market)
-            return
-        if len(self._positions) >= MAX_OPEN:
-            return
-        if self._on_cooldown(mid):
-            return
-        if market.spread >= MIN_ARB_SPREAD:
-            logger.info(
-                f"Strategy: ARB (general) '{market.label}' | "
-                f"combined={float(market.combined):.4f} spread={float(market.spread):.4f}"
-            )
-            await self._enter_arb(market)
+    def _has_arb(self, market: BTCMarket) -> bool:
+        """True only when CLOB best asks leave a real profit after fees."""
+        if market.yes_ask < NEAR_SETTLED or market.no_ask < NEAR_SETTLED:
+            return False
+        return market.spread >= MIN_ARB_SPREAD
 
     async def evaluate_market(self, market: BTCMarket) -> None:
-        """Called every poll cycle with fresh market prices."""
+        """Called every poll cycle. Only acts on genuine arb."""
         mid = market.market_id
-
-        # Update open positions
         if mid in self._positions:
-            await self._check_position(market)
-            return
-
+            return  # position already open, wait for it to settle
         if len(self._positions) >= MAX_OPEN:
             return
-
-        # ── Skip near-settled markets (one side < 5%) ────────────────────────
-        if market.yes_ask < NEAR_SETTLED or market.no_ask < NEAR_SETTLED:
-            return
-
-        # ── Pure arb mode ─────────────────────────────────────────────────────
-        if market.spread >= MIN_ARB_SPREAD and not self._on_cooldown(mid):
-            logger.info(
-                f"Strategy: ARB on '{market.label}' | "
-                f"combined={market.combined:.4f} spread={market.spread:.4f}"
-            )
-            await self._enter_arb(market)
-            return
-
-        # ── Mispricing mode ───────────────────────────────────────────────────
         if self._on_cooldown(mid):
             return
-
-        fair_yes = self._fair_yes(market)
-        fair_no  = Decimal("1") - fair_yes
-
-        yes_edge = fair_yes - market.yes_ask
-        no_edge  = fair_no  - market.no_ask
-
-        if yes_edge >= EDGE_THRESHOLD:
+        if self._has_arb(market):
             logger.info(
-                f"Strategy: YES mispriced on '{market.label}' | "
-                f"ask={market.yes_ask:.3f} fair={fair_yes:.3f} edge={yes_edge:.3f}"
+                f"Strategy: ARB '{market.label}' | "
+                f"YES={float(market.yes_ask):.3f} NO={float(market.no_ask):.3f} "
+                f"combined={float(market.combined):.3f} spread={float(market.spread):.3f}"
             )
-            await self._enter_directional(market, Side.YES, market.yes_ask)
-        elif no_edge >= EDGE_THRESHOLD:
-            logger.info(
-                f"Strategy: NO mispriced on '{market.label}' | "
-                f"ask={market.no_ask:.3f} fair={fair_no:.3f} edge={no_edge:.3f}"
-            )
-            await self._enter_directional(market, Side.NO, market.no_ask)
+            await self._enter_arb(market)
 
-    # ── Fair value ────────────────────────────────────────────────────────────
-
-    def _fair_yes(self, market: BTCMarket) -> Decimal:
-        """
-        Simple fair value model for BTC Up/Down markets.
-        Base = 0.50 (coin flip for short-term direction).
-        Adjust ±2% for momentum (strong up trend → slightly favour YES).
-        """
-        base = Decimal("0.50")
-        adj  = Decimal(str(self._momentum * 0.02))  # ±0.02 max
-        q = market.question.lower()
-        # Invert for "down" / "lower" markets
-        if any(w in q for w in ["down", "lower", "below", "fall", "drop"]):
-            adj = -adj
-        return max(Decimal("0.1"), min(Decimal("0.9"), base + adj))
-
-    # ── Trade execution (paper) ───────────────────────────────────────────────
+    async def evaluate_arb_only(self, market: BTCMarket) -> None:
+        """Same logic — used by the general arb scanner loop."""
+        await self.evaluate_market(market)
 
     async def _enter_arb(self, market: BTCMarket) -> None:
-        yes_price = await self._paper.fill(market.market_id, Side.YES,
-                                           market.yes_ask, self._size)
-        no_price  = await self._paper.fill(market.market_id, Side.NO,
-                                           market.no_ask,  self._size)
-        if yes_price is not None and no_price is not None:
-            self._record_entry(market.market_id)
-            # P&L uses actual fill prices, not Gamma midpoints
-            gross = Decimal("1") - yes_price - no_price
-            fees  = (yes_price + no_price) * FEE_RATE * 2
-            net   = (gross - fees) * self._size
-            self._cum_pnl += net
-            self._record_trade(market, "arb", net)
-            logger.info(
-                f"Strategy: ARB FILLED '{market.label}' "
-                f"yes={yes_price:.3f} no={no_price:.3f} "
-                f"net=${net:.2f} | cum=${self._cum_pnl:.2f}"
-            )
-
-    async def _enter_directional(self, market: BTCMarket,
-                                  side: Side, price: Decimal) -> None:
-        fill_price = await self._paper.fill(market.market_id, side, price, self._size)
-        if fill_price is None:
-            return
-
-        self._record_entry(market.market_id)
-        pos = Position(
-            market_id=market.market_id,
-            question=market.question,
-            entry_side=side,
-            entry_price=fill_price,   # use actual fill price
-            size=self._size,
+        """
+        Place both legs at current CLOB best asks.
+        P&L is only recorded if BOTH fills return non-None.
+        """
+        yes_fill = await self._trader.fill(
+            market.market_id, Side.YES, market.yes_ask, self._size
         )
-        self._positions[market.market_id] = pos
+        no_fill = await self._trader.fill(
+            market.market_id, Side.NO, market.no_ask, self._size
+        )
 
-        # Immediately try to hedge with opposite side
-        hedge_side  = Side.NO if side == Side.YES else Side.YES
-        hedge_price = market.no_ask if hedge_side == Side.NO else market.yes_ask
-        hedge_fill  = await self._paper.fill(market.market_id, hedge_side,
-                                             hedge_price, self._size)
-        if hedge_fill is not None:
-            pos.hedge_side  = hedge_side
-            pos.hedge_price = hedge_fill   # use actual hedge fill price
-            pos.hedge_at    = time.time()
-            net = pos.close_arb()
-            self._cum_pnl += net
-            del self._positions[market.market_id]
-            self._record_trade(market, "directional+hedge", net)
-            logger.info(
-                f"Strategy: HEDGED '{market.label}' "
-                f"entry={fill_price:.3f} hedge={hedge_fill:.3f} "
-                f"net=${net:.2f} | cum=${self._cum_pnl:.2f}"
-            )
-        else:
-            logger.info(
-                f"Strategy: DIRECTIONAL open '{market.label}' "
-                f"{side} @ {fill_price:.3f} (hedge pending)"
-            )
-
-    async def _check_position(self, market: BTCMarket) -> None:
-        """Check if an open directional position can be hedged or stopped."""
-        pos = self._positions.get(market.market_id)
-        if not pos or pos.is_hedged:
+        if yes_fill is None or no_fill is None:
+            # One or both legs failed — log which one, don't book any profit
+            if yes_fill is not None:
+                logger.warning(
+                    f"Strategy: YES filled but NO failed on '{market.label}' "
+                    f"— unhedged YES position at {yes_fill:.3f}"
+                )
+            elif no_fill is not None:
+                logger.warning(
+                    f"Strategy: NO filled but YES failed on '{market.label}' "
+                    f"— unhedged NO position at {no_fill:.3f}"
+                )
+            else:
+                logger.debug(f"Strategy: both legs failed for '{market.label}'")
             return
 
-        hedge_side  = Side.NO if pos.entry_side == Side.YES else Side.YES
-        hedge_price = market.no_ask if hedge_side == Side.NO else market.yes_ask
+        # Both legs filled — book the real profit
+        self._record_entry(market.market_id)
+        gross = Decimal("1") - yes_fill - no_fill
+        fees  = (yes_fill + no_fill) * FEE_RATE * 2
+        net   = (gross - fees) * self._size
+        self._cum_pnl += net
+        self._record_trade(market, "arb", net)
+        logger.info(
+            f"Strategy: ✅ ARB FILLED '{market.label}' "
+            f"YES@{yes_fill:.3f} NO@{no_fill:.3f} "
+            f"net=${net:.2f} | cum=${self._cum_pnl:.2f}"
+        )
 
-        # Try to lock in arb if combined is still favourable
-        combined = pos.entry_price + hedge_price
-        if combined < (Decimal("1") - FEE_RATE * 2):
-            fill_price = await self._paper.fill(market.market_id, hedge_side,
-                                                hedge_price, pos.size)
-            if fill_price is not None:
-                pos.hedge_side  = hedge_side
-                pos.hedge_price = fill_price
-                net = pos.close_arb()
-                self._cum_pnl += net
-                del self._positions[market.market_id]
-                self._record_trade(market, "delayed_hedge", net)
-                logger.info(
-                    f"Strategy: HEDGE FILLED '{market.label}' "
-                    f"net=${net:.2f} | cum=${self._cum_pnl:.2f}"
-                )
-                return
-
-        # Stop out if directional loss too large
-        current_price = (market.yes_ask if pos.entry_side == Side.YES
-                         else market.no_ask)
-        loss = (pos.entry_price - current_price) * pos.size
-        if loss > DIRECTIONAL_STOP * pos.size:
-            net = -loss - (pos.entry_price * FEE_RATE * pos.size)
-            self._cum_pnl += net
-            pos.status = PositionStatus.CANCELLED
-            pos.net_profit = net
-            del self._positions[market.market_id]
-            self._record_trade(market, "stopped", net)
-            logger.warning(
-                f"Strategy: STOPPED OUT '{market.label}' "
-                f"loss=${net:.2f} | cum=${self._cum_pnl:.2f}"
-            )
-
-    def _record_trade(self, market: BTCMarket, trade_type: str,
-                      net: Decimal) -> None:
+    def _record_trade(self, market: BTCMarket, trade_type: str, net: Decimal) -> None:
         self._trades.append({
             "time":    time.time(),
             "market":  market.label,
@@ -267,7 +138,7 @@ class BTCStrategy:
         })
         state_store.save(self._cum_pnl, self._trades)
 
-    # ── State for dashboard ───────────────────────────────────────────────────
+    # ── Dashboard properties ──────────────────────────────────────────────────
 
     @property
     def cumulative_pnl(self) -> Decimal:

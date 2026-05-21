@@ -156,19 +156,23 @@ class MarketFinder:
         return top
 
     async def refresh_prices(self, market: BTCMarket) -> BTCMarket:
-        """Fetch live CLOB ask prices for YES and NO tokens."""
+        """Fetch live CLOB orderbook best-ask prices for YES and NO tokens.
+        Uses /book (not /price) so we get the actual taker ask, not the midpoint."""
         yes_id, no_id = market.market_id.split(":", 1)
         try:
             yes_resp, no_resp = await asyncio.gather(
-                self._http.get(f"{CLOB_BASE}/price",
-                               params={"token_id": yes_id, "side": "buy"}),
-                self._http.get(f"{CLOB_BASE}/price",
-                               params={"token_id": no_id,  "side": "buy"}),
+                self._http.get(f"{CLOB_BASE}/book", params={"token_id": yes_id}),
+                self._http.get(f"{CLOB_BASE}/book", params={"token_id": no_id}),
             )
             yes_resp.raise_for_status()
             no_resp.raise_for_status()
-            market.yes_ask = Decimal(str(yes_resp.json().get("price", market.yes_ask)))
-            market.no_ask  = Decimal(str(no_resp.json().get("price",  market.no_ask)))
+
+            def _best_ask(book: dict, fallback: Decimal) -> Decimal:
+                asks = book.get("asks", [])
+                return Decimal(str(asks[0]["price"])) if asks else fallback
+
+            market.yes_ask = _best_ask(yes_resp.json(), market.yes_ask)
+            market.no_ask  = _best_ask(no_resp.json(),  market.no_ask)
         except Exception as exc:
             logger.debug(f"MarketFinder: price refresh error for {market.label}: {exc}")
         return market

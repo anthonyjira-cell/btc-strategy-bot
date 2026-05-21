@@ -85,12 +85,47 @@ class ArbScanner:
                 end_date=m.get("endDate", ""),
             ))
 
+        if not candidates:
+            logger.debug("ArbScanner: no arb candidates found this scan")
+            return []
+
+        # Verify candidates using real CLOB orderbook best asks (not Gamma midpoints).
+        # Gamma prices are last-traded / midpoint — actual CLOB asks may be higher,
+        # meaning the apparent arb doesn't exist at the CLOB level.
         candidates.sort(key=lambda m: m.spread, reverse=True)
-        top = candidates[:MAX_CANDIDATES]
+        to_verify = candidates[:MAX_CANDIDATES * 2]
+        verified: List[BTCMarket] = []
+
+        import asyncio as _asyncio
+
+        async def _verify(m: BTCMarket) -> BTCMarket:
+            yes_id, no_id = m.market_id.split(":", 1)
+            try:
+                yr, nr = await _asyncio.gather(
+                    self._http.get(f"{CLOB_BASE}/book", params={"token_id": yes_id}),
+                    self._http.get(f"{CLOB_BASE}/book", params={"token_id": no_id}),
+                )
+                yr.raise_for_status(); nr.raise_for_status()
+                def _best(book, fallback):
+                    asks = book.get("asks", [])
+                    return Decimal(str(asks[0]["price"])) if asks else fallback
+                m.yes_ask = _best(yr.json(), m.yes_ask)
+                m.no_ask  = _best(nr.json(), m.no_ask)
+            except Exception:
+                pass
+            return m
+
+        updated = await _asyncio.gather(*[_verify(m) for m in to_verify])
+        for m in updated:
+            if m.spread >= MIN_ARB_SPREAD:
+                verified.append(m)
+
+        verified.sort(key=lambda m: m.spread, reverse=True)
+        top = verified[:MAX_CANDIDATES]
 
         if top:
             logger.info(
-                f"ArbScanner: {len(candidates)} arb candidates → "
+                f"ArbScanner: {len(verified)} real arb candidates (CLOB-verified) → "
                 f"top {len(top)} | best spread={float(top[0].spread):.3f}"
             )
             for m in top[:5]:
@@ -100,7 +135,7 @@ class ArbScanner:
                     f"spread={float(m.spread):.3f} vol=${m.volume:,.0f}"
                 )
         else:
-            logger.debug("ArbScanner: no arb candidates found this scan")
+            logger.debug("ArbScanner: no real arb after CLOB verification")
 
         return top
 
