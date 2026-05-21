@@ -22,7 +22,7 @@ from btc_bot import state_store
 
 
 # ── Strategy parameters ───────────────────────────────────────────────────────
-MIN_ARB_SPREAD = Decimal("0.03")   # need 3%+ spread (fees ~1%, want 2%+ net profit)
+MIN_ARB_SPREAD = Decimal("0.02")   # need 2%+ spread (fees ~1%, want 1%+ net profit)
 FEE_RATE       = Decimal("0.005")  # 0.5% per leg
 MAX_OPEN       = 6                 # max concurrent open positions
 ARB_COOLDOWN   = 3600              # seconds before re-entering same market
