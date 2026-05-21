@@ -166,11 +166,11 @@ class LiveTrader:
                     )
                     return Decimal(str(order_price))
 
-                # Version mismatch in the response body → retry with other flag
+                # Wrong neg_risk flag → retry with the other value
                 err = str(resp) if resp else ""
-                if "order_version_mismatch" in err:
+                if "order_version_mismatch" in err or "invalid signature" in err:
                     logger.debug(
-                        f"LiveTrader: version mismatch (neg_risk={neg_risk}), retrying…"
+                        f"LiveTrader: sig/version mismatch (neg_risk={neg_risk}), retrying…"
                     )
                     continue
 
@@ -179,9 +179,9 @@ class LiveTrader:
 
             except Exception as exc:
                 err = str(exc)
-                if "order_version_mismatch" in err:
+                if "order_version_mismatch" in err or "invalid signature" in err:
                     logger.debug(
-                        f"LiveTrader: version mismatch exc (neg_risk={neg_risk}), retrying…"
+                        f"LiveTrader: sig/version mismatch exc (neg_risk={neg_risk}), retrying…"
                     )
                     continue
                 logger.error(f"LiveTrader: order error: {exc}")
