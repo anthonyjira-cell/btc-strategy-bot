@@ -33,10 +33,11 @@ from btc_bot.strategy import BTCStrategy
 # ── Logging setup ─────────────────────────────────────────────────────────────
 logger.remove()
 logger.add(
-    sys.stderr,
-    level="DEBUG" if not sys.stderr.isatty() else "INFO",
-    format="<green>{time:HH:mm:ss}</green> | <level>{level: <7}</level> | {message}",
-    colorize=sys.stderr.isatty(),
+    sys.stdout,
+    level="DEBUG",
+    format="{time:HH:mm:ss} | {level: <7} | {message}",
+    colorize=False,
+    enqueue=True,
 )
 
 MARKET_REFRESH_INTERVAL   = 30    # seconds between BTC market price refreshes
@@ -66,7 +67,11 @@ async def main() -> None:
 
     if live_mode and private_key:
         from btc_bot.live_trader import LiveTrader
-        trader = LiveTrader(private_key)
+        try:
+            trader = LiveTrader(private_key)
+        except Exception as exc:
+            print(f"FATAL: LiveTrader init failed: {exc}", flush=True)
+            sys.exit(1)
         logger.warning(
             f"⚠️  LIVE TRADING ENABLED — ${pos_size} per trade — REAL MONEY"
         )
