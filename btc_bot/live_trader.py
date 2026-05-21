@@ -164,11 +164,16 @@ class LiveTrader:
 
     @staticmethod
     def _resolve_token(market_id: str, side: Side) -> str:
+        """
+        For binary windows the strategy passes the token_id directly via
+        the market_id field (a plain numeric string, no colon).
+        For long-dated markets the format is "YES_TOKEN:NO_TOKEN".
+        """
         market_id = market_id.strip("'\"")
         if ":" in market_id:
             yes_id, no_id = market_id.split(":", 1)
             return yes_id if side == Side.YES else no_id
-        return market_id
+        return market_id   # already a token ID
 
     async def close(self) -> None:
         pass  # nothing to clean up

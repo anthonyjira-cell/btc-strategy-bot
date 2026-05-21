@@ -24,6 +24,7 @@ from decimal import Decimal
 from loguru import logger
 
 from btc_bot.arb_scanner import ArbScanner
+from btc_bot.btc_binary_finder import BTCBinaryFinder
 from btc_bot.btc_feed import BTCFeed
 from btc_bot.dashboard import create_app, start_dashboard
 from btc_bot.market_finder import MarketFinder
@@ -40,9 +41,10 @@ logger.add(
     enqueue=True,
 )
 
-MARKET_REFRESH_INTERVAL   = 30    # seconds between BTC market price refreshes
-MARKET_REDISCOVER_INTERVAL = 300  # seconds between full BTC market rediscovery
-ARB_SCAN_INTERVAL          = 90   # seconds between general arb scans
+BINARY_POLL_INTERVAL       = 10   # seconds between 5-min window checks
+MARKET_REFRESH_INTERVAL    = 60   # seconds between long-dated market refreshes
+MARKET_REDISCOVER_INTERVAL = 300  # seconds between full market rediscovery
+ARB_SCAN_INTERVAL          = 120  # seconds between general arb scans
 PORT = int(os.environ.get("PORT", 8080))
 
 
@@ -56,9 +58,10 @@ async def main() -> None:
         except NotImplementedError:
             pass
 
-    feed    = BTCFeed()
+    feed    = BTCFeed(poll_interval=5.0)   # 5s for intra-window sensitivity
     finder  = MarketFinder()
     scanner = ArbScanner()
+    binary  = BTCBinaryFinder()
 
     # ── Choose paper or live trading ──────────────────────────────────────────
     live_mode    = os.environ.get("LIVE_TRADING", "").lower() == "true"
@@ -101,12 +104,28 @@ async def main() -> None:
     # ── BTC price callback ────────────────────────────────────────────────────
     async def on_price(price: float) -> None:
         strategy.update_btc(price, feed.momentum)
-        for market in list(btc_markets):
-            await strategy.evaluate_market(market)
 
     feed.on_price(on_price)
 
-    # ── BTC market refresh loop ───────────────────────────────────────────────
+    # ── 5-minute binary window loop (PRIMARY ENGINE) ─────────────────────────
+    async def binary_loop() -> None:
+        while not stop_event.is_set():
+            try:
+                window = await binary.get_active_window()
+                if window:
+                    await strategy.evaluate_binary_window(window)
+                    await strategy.evaluate_directional(window)
+                    logger.debug(
+                        f"Binary: UP={float(window.up_ask):.3f} "
+                        f"DOWN={float(window.down_ask):.3f} "
+                        f"spread={float(window.spread):.3f} "
+                        f"{window.seconds_remaining:.0f}s left"
+                    )
+            except Exception as exc:
+                logger.warning(f"Main: binary_loop error: {exc}")
+            await asyncio.sleep(BINARY_POLL_INTERVAL)
+
+    # ── Long-dated market refresh loop ───────────────────────────────────────
     async def btc_market_loop() -> None:
         discover_counter = 0
         while not stop_event.is_set():
@@ -152,14 +171,13 @@ async def main() -> None:
 
     # ── Launch all tasks ──────────────────────────────────────────────────────
     tasks = [
-        asyncio.create_task(feed.run(stop_event),    name="btc-feed"),
-        asyncio.create_task(btc_market_loop(),        name="btc-markets"),
-        asyncio.create_task(arb_scan_loop(),          name="arb-scan"),
+        asyncio.create_task(feed.run(stop_event),  name="btc-feed"),
+        asyncio.create_task(binary_loop(),          name="binary-windows"),
+        asyncio.create_task(btc_market_loop(),      name="btc-markets"),
+        asyncio.create_task(arb_scan_loop(),        name="arb-scan"),
     ]
 
-    logger.info(
-        "Main: hybrid BTC strategy + general arb scanner started (paper mode)"
-    )
+    logger.info("Main: BTC 5-min binary strategy started")
 
     try:
         await stop_event.wait()
@@ -171,6 +189,7 @@ async def main() -> None:
         await runner.cleanup()
         await finder.close()
         await scanner.close()
+        await binary.close()
         await trader.close()
         logger.info("Main: stopped")
 
