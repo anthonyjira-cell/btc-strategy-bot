@@ -429,7 +429,25 @@ class BTCStrategy:
 
     @property
     def open_positions(self) -> int:
-        return len(self._positions)
+        return len(self._pending)
+
+    @property
+    def pending_positions(self) -> list:
+        """Live positions waiting for settlement."""
+        import time as _t
+        now = _t.time()
+        result = []
+        for p in self._pending.values():
+            secs_left = max(0, p["window_end"] - now)
+            result.append({
+                "slug":       p["slug"],
+                "side":       "UP" if p["is_up"] else "DOWN",
+                "cost":       p["cost"],
+                "shares":     round(p["shares"], 2),
+                "engine":     p["engine"],
+                "secs_left":  round(secs_left),
+            })
+        return result
 
     @property
     def trade_count(self) -> int:

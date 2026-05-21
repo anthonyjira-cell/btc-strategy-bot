@@ -59,6 +59,16 @@ _HTML = """<!DOCTYPE html>
 
 <div id="markets" class="mkt"></div>
 
+<div id="pending-section" style="margin-bottom:16px;display:none">
+  <div style="color:#d29922;font-size:.8rem;margin-bottom:6px">⏳ PENDING POSITIONS</div>
+  <table>
+    <thead><tr>
+      <th>Window</th><th>Side</th><th>Engine</th><th>Cost</th><th>Shares</th><th>Time Left</th>
+    </tr></thead>
+    <tbody id="pending-rows"></tbody>
+  </table>
+</div>
+
 <table>
   <thead><tr>
     <th>Time</th><th>Market</th><th>Type</th><th>Net</th><th>Cum PnL</th>
@@ -107,6 +117,19 @@ async function refresh(){
         <div>Combined: <b class="${m.spread>0.03?'green':m.spread>0?'yellow':'red'}">${m.combined?.toFixed(4)||'--'}</b>
           &nbsp; Spread: <b class="${m.spread>0.03?'green':m.spread>0?'yellow':'red'}">${m.spread?.toFixed(4)||'--'}</b></div>
       </div>`).join('');
+
+    const pending=d.pending_positions||[];
+    const psec=document.getElementById('pending-section');
+    psec.style.display=pending.length?'block':'none';
+    document.getElementById('pending-rows').innerHTML=pending.map(p=>`
+      <tr>
+        <td style="font-size:.75rem">${p.slug.replace('btc-updown-5m-','')}</td>
+        <td class="${p.side==='UP'?'green':'red'}">${p.side}</td>
+        <td>${p.engine}</td>
+        <td>$${p.cost.toFixed(2)}</td>
+        <td>${p.shares}</td>
+        <td class="${p.secs_left<30?'red':p.secs_left<90?'yellow':''}">${p.secs_left}s</td>
+      </tr>`).join('');
 
     document.getElementById('trade-rows').innerHTML=(d.recent_trades||[]).reverse().map(t=>`
       <tr>
@@ -168,7 +191,8 @@ def create_app(strategy: "BTCStrategy", feed: "BTCFeed",
                 }
                 for m in markets_holder
             ],
-            "recent_trades": strategy.recent_trades,
+            "recent_trades":      strategy.recent_trades,
+            "pending_positions":  strategy.pending_positions,
         }
         return web.Response(text=json.dumps(payload), content_type="application/json")
 
