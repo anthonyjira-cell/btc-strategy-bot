@@ -39,7 +39,7 @@ class BTCFeed:
         self._callbacks: list           = []
         self._source:   str             = "none"
         self._poll_interval             = poll_interval
-        self._last_tick: float          = 0.0   # timestamp of last price update
+        self._last_tick: float          = 0.0   # timestamp of last price update; set on first tick
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -146,11 +146,17 @@ class BTCFeed:
                 if stop_event.is_set():
                     break
 
-                # Skip REST poll if WebSocket is delivering fresh ticks
-                if (
+                # Skip REST poll if WebSocket is delivering fresh ticks,
+                # OR if WS just connected but hasn't received its first tick yet
+                # (last_tick=0 means WS hasn't ticked yet — give it WS_STALE_SECS to warm up)
+                ws_fresh = (
                     self._source == "kraken-ws"
-                    and _time.time() - self._last_tick < WS_STALE_SECS
-                ):
+                    and (
+                        self._last_tick == 0.0   # WS just connected, not ticked yet
+                        or _time.time() - self._last_tick < WS_STALE_SECS
+                    )
+                )
+                if ws_fresh:
                     continue
 
                 # WebSocket stale or down — fall back to REST
