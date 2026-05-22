@@ -376,13 +376,15 @@ class BTCStrategy:
 
         # Don't record PnL yet — wait for actual resolution
         self._pending[window.slug] = {
-            "slug":       window.slug,
-            "cost":       float(size),
-            "shares":     shares,
-            "window_end": window.window_end,
-            "is_up":      btc_up,
-            "engine":     engine,
-            "time":       time.time(),
+            "slug":         window.slug,
+            "cost":         float(size),
+            "shares":       shares,
+            "window_end":   window.window_end,
+            "is_up":        btc_up,
+            "engine":       engine,
+            "time":         time.time(),
+            "up_token_id":  window.up_token_id,
+            "down_token_id": window.down_token_id,
         }
         state_store.save(self._cum_pnl, self._trades, self._pending, self._loss_cooldown_until)
 
@@ -433,8 +435,8 @@ class BTCStrategy:
         if not to_check:
             return
 
-        # Force-clear positions older than 2 hours — Gamma may never close them
-        FORCE_CLEAR_SECS = 7200
+        # Force-clear positions older than 30 min — Gamma never returns closed slugs
+        FORCE_CLEAR_SECS = 1800
         for pos in list(to_check):
             if now - pos["window_end"] > FORCE_CLEAR_SECS:
                 slug = pos["slug"]
@@ -462,15 +464,30 @@ class BTCStrategy:
             for pos in to_check:
                 slug = pos["slug"]
                 try:
-                    resp = await http.get(
-                        f"{GAMMA_BASE}/markets", params={"slug": slug}
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if not data:
-                        logger.warning(f"Strategy: settle — Gamma returned empty for {slug}")
-                        continue
-                    m = data[0] if isinstance(data, list) else data
+                    # Query by token ID — works for both open and closed markets.
+                    # Slug-only queries return empty for resolved markets on Gamma.
+                    up_tok = pos.get("up_token_id", "")
+                    m = None
+                    if up_tok:
+                        resp = await http.get(
+                            f"{GAMMA_BASE}/markets",
+                            params={"clob_token_ids": up_tok}
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if data:
+                                m = data[0] if isinstance(data, list) else data
+                    # Fallback: try slug (works for active markets)
+                    if m is None:
+                        resp = await http.get(
+                            f"{GAMMA_BASE}/markets", params={"slug": slug}
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        if not data:
+                            logger.debug(f"Strategy: settle — no Gamma data for {slug}")
+                            continue
+                        m = data[0] if isinstance(data, list) else data
 
                     if not m.get("closed"):
                         logger.debug(f"Strategy: settle — {slug} not closed yet")
