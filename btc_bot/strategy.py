@@ -124,6 +124,12 @@ class BTCStrategy:
         self._last_arb:  Dict[str, float] = {}
         self._positions: Dict[str, dict]  = {}
 
+        # Session tracking (resets each boot — reflects current session only)
+        self._session_pnl:    Decimal = Decimal("0")
+        self._session_wins:   int = 0
+        self._session_losses: int = 0
+        self._session_start:  float = time.time()
+
         # Persistence
         saved = state_store.load()
         self._cum_pnl  = Decimal(str(saved.get("cum_pnl", 0)))
@@ -480,7 +486,12 @@ class BTCStrategy:
                         else -pos["cost"]
                     ))
 
-                    self._cum_pnl += actual_pnl
+                    self._cum_pnl     += actual_pnl
+                    self._session_pnl += actual_pnl
+                    if won:
+                        self._session_wins   += 1
+                    else:
+                        self._session_losses += 1
                     self._trades.append({
                         "time":    pos["time"],
                         "market":  slug,
@@ -519,6 +530,22 @@ class BTCStrategy:
     @property
     def cumulative_pnl(self) -> Decimal:
         return self._cum_pnl
+
+    @property
+    def session_pnl(self) -> Decimal:
+        return self._session_pnl
+
+    @property
+    def session_wins(self) -> int:
+        return self._session_wins
+
+    @property
+    def session_losses(self) -> int:
+        return self._session_losses
+
+    @property
+    def session_start(self) -> float:
+        return self._session_start
 
     @property
     def open_positions(self) -> int:

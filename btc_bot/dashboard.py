@@ -52,8 +52,8 @@ _HTML = """<!DOCTYPE html>
 <div class="stats">
   <div>BTC Price: <span id="btc">—</span> <span id="src" style="font-size:.7rem;color:#8b949e"></span></div>
   <div>Momentum: <span id="mom">—</span></div>
-  <div>Cum PnL: <span id="pnl">—</span></div>
-  <div>Trades: <span id="trades">—</span></div>
+  <div>Session PnL: <span id="pnl">—</span> <span id="session-since" style="font-size:.7rem;color:#8b949e"></span></div>
+  <div>W/L: <span id="wl">—</span></div>
   <div>Open: <span id="open">—</span></div>
 </div>
 
@@ -98,9 +98,14 @@ async function refresh(){
     document.getElementById('btc').textContent=d.btc_price?'$'+d.btc_price.toLocaleString():'—';
     document.getElementById('src').textContent=d.btc_source?`via ${d.btc_source}`:'';
     document.getElementById('mom').innerHTML=momLabel(d.momentum||0);
-    const p=d.cum_pnl||0;
+    const p=d.session_pnl||0;
     document.getElementById('pnl').innerHTML=`<span class="${cls(p)}">${fmt(p,2)}</span>`;
-    document.getElementById('trades').textContent=d.trade_count||0;
+    document.getElementById('session-since').textContent=d.session_since?`since ${d.session_since}`:'';
+    const w=d.session_wins||0, l=d.session_losses||0, tot=w+l;
+    const wr=tot>0?Math.round(w/tot*100)+'%':'—';
+    document.getElementById('wl').innerHTML=tot>0
+      ?`<span class="green">${w}W</span> / <span class="red">${l}L</span> <span style="color:#8b949e;font-size:.8rem">(${wr})</span>`
+      :'—';
     document.getElementById('open').textContent=d.open_positions||0;
 
     document.getElementById('markets').innerHTML=(d.markets||[]).map(m=>`
@@ -172,12 +177,18 @@ def create_app(strategy: "BTCStrategy", feed: "BTCFeed",
             return None
 
         payload = {
-            "btc_price":     feed.price,
-            "btc_source":    feed.source,
-            "momentum":      feed.momentum,
-            "cum_pnl":       float(strategy.cumulative_pnl),
-            "trade_count":   strategy.trade_count,
-            "open_positions":strategy.open_positions,
+            "btc_price":      feed.price,
+            "btc_source":     feed.source,
+            "momentum":       feed.momentum,
+            "cum_pnl":        float(strategy.cumulative_pnl),
+            "session_pnl":    float(strategy.session_pnl),
+            "session_wins":   strategy.session_wins,
+            "session_losses": strategy.session_losses,
+            "session_since":  datetime.fromtimestamp(
+                                  strategy.session_start
+                              ).strftime("%-I:%M %p"),
+            "trade_count":    strategy.trade_count,
+            "open_positions": strategy.open_positions,
             "markets": [
                 {
                     "label":      m.label,
