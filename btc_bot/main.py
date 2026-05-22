@@ -111,6 +111,8 @@ async def main() -> None:
     async def binary_loop() -> None:
         while not stop_event.is_set():
             try:
+                # Settle FIRST so loss cooldowns are set before we evaluate new windows
+                await strategy.settle_pending()
                 window = await binary.get_active_window()
                 if window:
                     await strategy.evaluate_binary_window(window)
@@ -121,8 +123,6 @@ async def main() -> None:
                         f"spread={float(window.spread):.3f} "
                         f"{window.seconds_remaining:.0f}s left"
                     )
-                # Settle any positions whose windows have now closed
-                await strategy.settle_pending()
             except Exception as exc:
                 logger.warning(f"Main: binary_loop error: {exc}")
             await asyncio.sleep(BINARY_POLL_INTERVAL)

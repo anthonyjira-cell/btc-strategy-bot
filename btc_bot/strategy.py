@@ -21,6 +21,7 @@ Position sizing: Kelly formula capped at 25% of bankroll.
 from __future__ import annotations
 
 import json
+import os
 import time
 from decimal import Decimal
 from typing import Dict, List, Optional
@@ -39,15 +40,20 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 # Dislocation engine
 DISLOC_MIN_BTC_MOVE   = 0.05   # % BTC must move to trigger dislocation check
-DISLOC_MIN_EDGE       = 0.05   # token must be 5%+ below fair value (raised from 2% to reduce marginal trades)
-DISLOC_MIN_TOKEN      = 0.33   # don't buy tokens below this — market already moved too far, formula overestimates
-DISLOC_MAX_BET        = Decimal("8.00")   # cap dislocation bets
+DISLOC_MIN_EDGE       = 0.06   # token must be 6%+ below fair value
+DISLOC_MIN_TOKEN      = 0.33   # don't buy tokens below this — market already moved too far
+DISLOC_MAX_TOKEN      = 0.55   # don't buy tokens above this — break-even too high (need 55%+ win rate)
+DISLOC_MAX_BET        = Decimal("6.00")   # cap dislocation bets
 
 # Directional engine (end of window)
+# Only fires when the token is STILL cheap despite BTC having clearly moved.
+# At 0.70+ the market has already priced the move — risk/reward is terrible.
 DIRECT_SECONDS_LEFT   = 30     # only fire in final 30s
 DIRECT_MIN_CONFIDENCE = 0.45   # composite_confidence = fair_prob - 0.5
-DIRECT_BTC_CONFIRM    = 0.03   # % BTC must confirm direction
-DIRECT_MAX_BET        = Decimal("5.00")   # cap directional bets
+DIRECT_BTC_CONFIRM    = 0.05   # % BTC must confirm direction (raised from 0.03)
+DIRECT_MAX_TOKEN      = 0.65   # skip if token already priced in (>0.65)
+DIRECT_MIN_EDGE       = 0.10   # require 10%+ edge — final 30s formula is noisy
+DIRECT_MAX_BET        = Decimal("4.00")   # cap directional bets
 
 # Loss cooldown — skip N windows after a loss to avoid chasing reversals
 LOSS_COOLDOWN_WINDOWS = 2      # wait 2 windows (10 min) after any loss before trading again
@@ -95,6 +101,13 @@ def dislocation_fair_prob(delta_pct: float, minutes_remaining: float) -> float:
 class BTCStrategy:
     def __init__(self, trader, bankroll: float = 99.0,
                  position_size: Decimal = Decimal("15")):
+        # Allow runtime bankroll override via env var (e.g. CURRENT_BANKROLL=30)
+        env_bankroll = os.environ.get("CURRENT_BANKROLL", "")
+        if env_bankroll:
+            try:
+                bankroll = float(env_bankroll)
+            except ValueError:
+                pass
         self._trader   = trader
         self._bankroll = bankroll
         self._size     = position_size   # fallback fixed size
@@ -200,6 +213,9 @@ class BTCStrategy:
             if token_price < DISLOC_MIN_TOKEN:
                 logger.debug(f"Strategy: DISLOC skip — UP token {token_price:.3f} below min {DISLOC_MIN_TOKEN}")
                 return
+            if token_price > DISLOC_MAX_TOKEN:
+                logger.debug(f"Strategy: DISLOC skip — UP token {token_price:.3f} above max {DISLOC_MAX_TOKEN} (market priced in)")
+                return
             edge        = fair - token_price
             side_label  = "UP"
         else:
@@ -208,6 +224,9 @@ class BTCStrategy:
                 return   # no liquidity — empty book fallback
             if token_price < DISLOC_MIN_TOKEN:
                 logger.debug(f"Strategy: DISLOC skip — DOWN token {token_price:.3f} below min {DISLOC_MIN_TOKEN}")
+                return
+            if token_price > DISLOC_MAX_TOKEN:
+                logger.debug(f"Strategy: DISLOC skip — DOWN token {token_price:.3f} above max {DISLOC_MAX_TOKEN} (market priced in)")
                 return
             fair        = 1.0 - (0.5 - (fair - 0.5))   # mirror for DOWN direction
             fair        = dislocation_fair_prob(abs(delta_pct), minutes_left)
@@ -267,8 +286,20 @@ class BTCStrategy:
         token_price = float(window.up_ask) if btc_up else float(window.down_ask)
         if token_price <= 0:
             return   # no liquidity — empty book fallback, don't trade
+        if token_price > DIRECT_MAX_TOKEN:
+            logger.debug(
+                f"Strategy: DIRECT skip — token {token_price:.3f} above max {DIRECT_MAX_TOKEN} "
+                f"(break-even >{DIRECT_MAX_TOKEN*100:.0f}% — terrible R/R)"
+            )
+            return
         edge        = fair - token_price
         side_label  = "UP" if btc_up else "DOWN"
+
+        if edge < DIRECT_MIN_EDGE:
+            logger.debug(
+                f"Strategy: DIRECT skip — edge {edge:.3f} below min {DIRECT_MIN_EDGE}"
+            )
+            return
 
         logger.info(
             f"Strategy: ⚡ DIRECTIONAL {side_label} | "
@@ -382,7 +413,7 @@ class BTCStrategy:
         Called every binary_loop cycle so settlements happen within ~10s of expiry.
         """
         now = time.time()
-        to_check = [p for p in self._pending.values() if p["window_end"] + 15 < now]
+        to_check = [p for p in self._pending.values() if p["window_end"] + 3 < now]
         if not to_check:
             return
 
