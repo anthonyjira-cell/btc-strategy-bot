@@ -43,7 +43,7 @@ DISLOC_MIN_BTC_MOVE   = 0.05   # % BTC must move to trigger dislocation check
 DISLOC_MIN_EDGE       = 0.06   # token must be 6%+ below fair value
 DISLOC_MIN_TOKEN      = 0.33   # don't buy tokens below this — market already moved too far
 DISLOC_MAX_TOKEN      = 0.55   # don't buy tokens above this — break-even too high (need 55%+ win rate)
-DISLOC_MAX_BET        = Decimal("6.00")   # cap dislocation bets
+DISLOC_MAX_BET        = Decimal("4.00")   # cap dislocation bets
 
 # Directional engine (end of window)
 # Only fires when the token is STILL cheap despite BTC having clearly moved.
@@ -54,7 +54,7 @@ DIRECT_BTC_CONFIRM    = 0.05   # % BTC must confirm direction (raised from 0.03)
 DIRECT_MIN_TOKEN      = 0.33   # don't buy tokens below this — market has already moved too far
 DIRECT_MAX_TOKEN      = 0.65   # skip if token already priced in (>0.65)
 DIRECT_MIN_EDGE       = 0.10   # require 10%+ edge — final 30s formula is noisy
-DIRECT_MAX_BET        = Decimal("4.00")   # cap directional bets
+DIRECT_MAX_BET        = Decimal("3.00")   # cap directional bets
 
 # Loss cooldown — skip N windows after a loss to avoid chasing reversals
 LOSS_COOLDOWN_WINDOWS = 2      # wait 2 windows (10 min) after any loss before trading again
