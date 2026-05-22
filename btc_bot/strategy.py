@@ -51,6 +51,7 @@ DISLOC_MAX_BET        = Decimal("6.00")   # cap dislocation bets
 DIRECT_SECONDS_LEFT   = 30     # only fire in final 30s
 DIRECT_MIN_CONFIDENCE = 0.45   # composite_confidence = fair_prob - 0.5
 DIRECT_BTC_CONFIRM    = 0.05   # % BTC must confirm direction (raised from 0.03)
+DIRECT_MIN_TOKEN      = 0.33   # don't buy tokens below this — market has already moved too far
 DIRECT_MAX_TOKEN      = 0.65   # skip if token already priced in (>0.65)
 DIRECT_MIN_EDGE       = 0.10   # require 10%+ edge — final 30s formula is noisy
 DIRECT_MAX_BET        = Decimal("4.00")   # cap directional bets
@@ -286,6 +287,9 @@ class BTCStrategy:
         token_price = float(window.up_ask) if btc_up else float(window.down_ask)
         if token_price <= 0:
             return   # no liquidity — empty book fallback, don't trade
+        if token_price < DIRECT_MIN_TOKEN:
+            logger.debug(f"Strategy: DIRECT skip — token {token_price:.3f} below min {DIRECT_MIN_TOKEN} (market moved too far)")
+            return
         if token_price > DIRECT_MAX_TOKEN:
             logger.debug(
                 f"Strategy: DIRECT skip — token {token_price:.3f} above max {DIRECT_MAX_TOKEN} "
@@ -413,7 +417,7 @@ class BTCStrategy:
         Called every binary_loop cycle so settlements happen within ~10s of expiry.
         """
         now = time.time()
-        to_check = [p for p in self._pending.values() if p["window_end"] + 3 < now]
+        to_check = [p for p in self._pending.values() if p["window_end"] <= now]
         if not to_check:
             return
 
