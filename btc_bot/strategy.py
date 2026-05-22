@@ -123,7 +123,6 @@ class BTCStrategy:
         self._traded_window: int = 0   # last window we traded in (avoid doubles)
         self._last_arb:  Dict[str, float] = {}
         self._positions: Dict[str, dict]  = {}
-        self._loss_cooldown_until: int = 0  # window_start timestamp, don't trade until after this
 
         # Persistence
         saved = state_store.load()
@@ -131,8 +130,11 @@ class BTCStrategy:
         self._trades:  List[dict] = saved.get("trades", [])
         # Pending positions waiting for settlement — keyed by window slug
         self._pending: Dict[str, dict] = saved.get("pending", {})
-        # Write state immediately on startup so Redis key exists from boot
-        state_store.save(self._cum_pnl, self._trades, self._pending)
+        # Loss cooldown — persisted so it survives redeploys
+        self._loss_cooldown_until: int = saved.get("loss_cooldown_until", 0)
+        # Write state immediately on startup so volume file exists from boot
+        state_store.save(self._cum_pnl, self._trades, self._pending,
+                         self._loss_cooldown_until)
 
     # ── State updates ─────────────────────────────────────────────────────────
 
@@ -180,6 +182,9 @@ class BTCStrategy:
             logger.debug(f"Strategy: late-set window_open=${self._btc_price:,.0f}")
         if self._traded_window == window.window_start:
             return   # already traded this window
+        if self._pending:
+            logger.debug(f"Strategy: {len(self._pending)} pending position(s) — waiting for settlement")
+            return   # one trade at a time — wait for previous to settle
         if len(self._positions) >= MAX_OPEN:
             return
         if window.window_start <= self._loss_cooldown_until:
@@ -373,7 +378,7 @@ class BTCStrategy:
             "engine":     engine,
             "time":       time.time(),
         }
-        state_store.save(self._cum_pnl, self._trades, self._pending)
+        state_store.save(self._cum_pnl, self._trades, self._pending, self._loss_cooldown_until)
 
         logger.info(
             f"Strategy: ✅ {engine.upper()} {'UP' if btc_up else 'DOWN'} "
@@ -401,7 +406,7 @@ class BTCStrategy:
             "net":     float(net),
             "cum_pnl": float(self._cum_pnl),
         })
-        state_store.save(self._cum_pnl, self._trades, self._pending)
+        state_store.save(self._cum_pnl, self._trades, self._pending, self._loss_cooldown_until)
         logger.info(
             f"Strategy: ✅ ARB '{market.label}' "
             f"YES@{yes_fill:.3f} NO@{no_fill:.3f} "
@@ -466,7 +471,7 @@ class BTCStrategy:
                             f"{LOSS_COOLDOWN_WINDOWS} windows"
                         )
                     del self._pending[slug]
-                    state_store.save(self._cum_pnl, self._trades, self._pending)
+                    state_store.save(self._cum_pnl, self._trades, self._pending, self._loss_cooldown_until)
 
                     logger.info(
                         f"Strategy: {'✅ WIN' if won else '❌ LOSS'} "

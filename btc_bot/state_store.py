@@ -98,12 +98,14 @@ def load() -> dict:
     return {"cum_pnl": 0.0, "trades": [], "pending": {}}
 
 
-def save(cum_pnl: Decimal, trades: List[dict], pending: dict = None) -> None:
+def save(cum_pnl: Decimal, trades: List[dict], pending: dict = None,
+         loss_cooldown_until: int = 0) -> None:
     """Persist current state (Redis if available, else file)."""
     data = {
-        "cum_pnl": float(cum_pnl),
-        "trades":  trades,
-        "pending": pending or {},
+        "cum_pnl":             float(cum_pnl),
+        "trades":              trades,
+        "pending":             pending or {},
+        "loss_cooldown_until": loss_cooldown_until,
     }
     payload = json.dumps(data)
 
