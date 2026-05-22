@@ -420,13 +420,39 @@ class BTCStrategy:
         For each pending position whose window has expired, fetch the Gamma
         market result and record actual PnL (win = shares×$1 − cost, loss = −cost).
         Called every binary_loop cycle so settlements happen within ~10s of expiry.
+        Positions older than 2 hours are force-cleared as losses to prevent blocking.
         """
         now = time.time()
         to_check = [p for p in self._pending.values() if p["window_end"] <= now]
         if not to_check:
             return
 
-        async with httpx.AsyncClient(timeout=5.0) as http:
+        # Force-clear positions older than 2 hours — Gamma may never close them
+        FORCE_CLEAR_SECS = 7200
+        for pos in list(to_check):
+            if now - pos["window_end"] > FORCE_CLEAR_SECS:
+                slug = pos["slug"]
+                actual_pnl = Decimal(str(-pos["cost"]))
+                self._cum_pnl += actual_pnl
+                self._trades.append({
+                    "time":    pos["time"],
+                    "market":  slug,
+                    "type":    pos["engine"],
+                    "net":     float(actual_pnl),
+                    "cum_pnl": float(self._cum_pnl),
+                })
+                del self._pending[slug]
+                to_check = [p for p in to_check if p["slug"] != slug]
+                state_store.save(self._cum_pnl, self._trades, self._pending, self._loss_cooldown_until)
+                logger.warning(
+                    f"Strategy: ⏰ FORCE-CLEARED {slug} (>2h old, no Gamma response) "
+                    f"— recorded as loss ${actual_pnl:.2f}"
+                )
+
+        if not to_check:
+            return
+
+        async with httpx.AsyncClient(timeout=8.0) as http:
             for pos in to_check:
                 slug = pos["slug"]
                 try:
@@ -436,10 +462,12 @@ class BTCStrategy:
                     resp.raise_for_status()
                     data = resp.json()
                     if not data:
+                        logger.warning(f"Strategy: settle — Gamma returned empty for {slug}")
                         continue
                     m = data[0] if isinstance(data, list) else data
 
                     if not m.get("closed"):
+                        logger.debug(f"Strategy: settle — {slug} not closed yet")
                         continue   # not resolved yet — check next cycle
 
                     raw_px = m.get("outcomePrices", '["0.5","0.5"]')
@@ -480,7 +508,7 @@ class BTCStrategy:
                     )
 
                 except Exception as exc:
-                    logger.debug(f"Strategy: settle error for {slug}: {exc}")
+                    logger.warning(f"Strategy: settle error for {slug}: {exc}")
 
     # ── Dashboard ─────────────────────────────────────────────────────────────
 
